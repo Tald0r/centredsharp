@@ -16,41 +16,28 @@ public class GradientTool : BaseTool
 
     // Selection state
     private bool _isSelecting = false;
-    private TileObject? _startTile = null;
-    private TileObject? _endTile = null;
-    private Rectangle _selectionArea = Rectangle.Empty;
+    private TileObject? _startTile = null;     // Anchor/center point
+    private TileObject? _endTile = null;       // Target endpoint
     
-    // Gradient settings
-    private int _transitionType = 0; // 0=Linear, 1=Smooth, 2=S-Curve
-    private bool _useEdgeFade = true;
-    private int _edgeFadeWidth = 2;
-    private bool _useHeightLimits = false;
-    private int _minHeight = -128;
-    private int _maxHeight = 127;
-    private int _pathWidth = 5;
+    // Path settings
+    private int _transitionType = 0;           // 0=Linear, 1=Smooth, 2=S-Curve
+    private int _pathWidth = 5;                // Width of path in tiles
+    private bool _useEdgeFade = true;          // Fade edges of path
+    private int _edgeFadeWidth = 2;            // Width of fade area in tiles
+    private bool _heightThreshold = true;      // Only create paths between different heights
+    private int _minHeightDiff = 3;            // Minimum height difference to create path
     private bool _respectExistingTerrain = true;
     private float _blendFactor = 0.5f;
     
     // Internal calculation fields
-    private Vector2 _gradientDirection;
-    private float _gradientLength;
-    private int _startHeight;
-    private int _endHeight;
+    private Vector2 _pathDirection;            // Direction vector from start to end
+    private float _pathLength;                 // Length of path in tiles
 
     // Main drawing UI
     internal override void Draw()
     {
-        DrawGradientSection();
-        ImGui.Spacing();
-        DrawLimitsSection();
-        ImGui.Spacing();
-        DrawInstructionsSection();
-    }
-    
-    private void DrawGradientSection()
-    {
-        ImGui.Text("Gradient Settings");
-        ImGui.BeginChild("GradientSection", new System.Numerics.Vector2(-1, 140), ImGuiChildFlags.Border);
+        ImGui.Text("Path Settings");
+        ImGui.BeginChild("PathSettings", new System.Numerics.Vector2(-1, 180), ImGuiChildFlags.Border);
         
         // Transition type dropdown
         ImGui.Text("Transition Type:");
@@ -79,13 +66,23 @@ public class GradientTool : BaseTool
         ImGui.InputInt("##pathWidth", ref _pathWidth);
         if (_pathWidth < 1) _pathWidth = 1;
         
+        // Height difference threshold
+        ImGui.Checkbox("Require Height Difference", ref _heightThreshold);
+        if (_heightThreshold)
+        {
+            ImGui.SameLine(140);
+            ImGui.SetNextItemWidth(150);
+            ImGui.InputInt("Min Difference", ref _minHeightDiff);
+            if (_minHeightDiff < 0) _minHeightDiff = 0;
+        }
+        
         // Edge fade
         ImGui.Checkbox("Edge Fade", ref _useEdgeFade);
         if (_useEdgeFade)
         {
             ImGui.SameLine(140);
             ImGui.SetNextItemWidth(150);
-            ImGui.InputInt("Width##fadeWidth", ref _edgeFadeWidth);
+            ImGui.InputInt("Fade Width", ref _edgeFadeWidth);
             if (_edgeFadeWidth < 1) _edgeFadeWidth = 1;
         }
         
@@ -99,265 +96,230 @@ public class GradientTool : BaseTool
         }
         
         ImGui.EndChild();
-    }
-
-    private void DrawLimitsSection()
-    {
-        ImGui.Text("Height Limits");
-        ImGui.BeginChild("LimitsSection", new System.Numerics.Vector2(-1, 80), ImGuiChildFlags.Border);
         
-        // Height constraints checkbox
-        ImGui.Checkbox("Use Height Limits", ref _useHeightLimits);
+        ImGui.Spacing();
         
-        // Min/Max height inputs
-        ImGui.BeginDisabled(!_useHeightLimits);
+        // Instructions
+        ImGui.TextWrapped("Hold CTRL and click to set the start point, then drag to create a path to your target area.");
+        ImGui.TextWrapped("The tool will create a smooth height transition between different elevations.");
         
-        ImGui.Text("Min Height:");
-        ImGui.SameLine(120);
-        ImGui.SetNextItemWidth(80);
-        ImGui.InputInt("##minHeight", ref _minHeight);
-        if (_minHeight < -128) _minHeight = -128;
-        
-        ImGui.SameLine(220);
-        ImGui.Text("Max Height:");
-        ImGui.SameLine(300);
-        ImGui.SetNextItemWidth(80);
-        ImGui.InputInt("##maxHeight", ref _maxHeight);
-        if (_maxHeight > 127) _maxHeight = 127;
-        
-        ImGui.EndDisabled();
-        
-        ImGui.EndChild();
-    }
-
-    private void DrawInstructionsSection()
-    {
-        ImGui.TextWrapped("Hold CTRL and drag with left mouse button to define a gradient area.");
-        ImGui.TextWrapped("The tool will create a smooth height transition between start and end points.");
-        
-        if (_selectionArea != Rectangle.Empty)
+        // Show current selection status
+        if (_startTile != null && _endTile != null)
         {
             ImGui.Separator();
-            ImGui.Text($"Selection: ({_selectionArea.X},{_selectionArea.Y}) to ({_selectionArea.Right-1},{_selectionArea.Bottom-1})");
+            ImGui.Text($"Start: ({_startTile.Tile.X},{_startTile.Tile.Y}, Z:{_startTile.Tile.Z})");
+            ImGui.Text($"End: ({_endTile.Tile.X},{_endTile.Tile.Y}, Z:{_endTile.Tile.Z})");
             
-            if (_startHeight != _endHeight)
+            int heightDiff = Math.Abs(_endTile.Tile.Z - _startTile.Tile.Z);
+            ImGui.Text($"Height Difference: {heightDiff} tiles");
+            
+            if (_pathLength > 0 && heightDiff > 0)
             {
-                ImGui.Text($"Height Change: {_startHeight} to {_endHeight} ({Math.Abs(_endHeight - _startHeight)} tiles difference)");
-                float slope = Math.Abs(_endHeight - _startHeight) / (float)_gradientLength;
-                ImGui.Text($"Average Slope: {slope:F2}");
+                float slope = heightDiff / _pathLength;
+                ImGui.Text($"Average Slope: {slope:F2} (1:{(1/slope):F1})");
             }
         }
     }
     
-    // Method to handle mouse press events
-    public override void OnMousePressed(TileObject? o)
+    // GhostApply - Required by BaseTool
+    protected override void GhostApply(TileObject? o)
     {
         if (o is not LandObject landObject)
             return;
-            
+        
         bool ctrlPressed = Keyboard.GetState().IsKeyDown(Keys.LeftControl) || 
-                          Keyboard.GetState().IsKeyDown(Keys.RightControl);
+                           Keyboard.GetState().IsKeyDown(Keys.RightControl);
         
         if (ctrlPressed) 
         {
-            _isSelecting = true;
-            _startTile = o;
-            _selectionArea = Rectangle.Empty;
-        }
-        else
-        {
-            base.OnMousePressed(o);
+            if (!_isSelecting)
+            {
+                // First click - set the start point
+                _isSelecting = true;
+                _startTile = o;
+                ClearGhosts(); // Clear any existing ghosts
+            }
+            else if (_startTile != null)
+            {
+                // Update the end point as we drag
+                _endTile = o;
+                
+                // Calculate path direction and length
+                float dx = _endTile.Tile.X - _startTile.Tile.X;
+                float dy = _endTile.Tile.Y - _startTile.Tile.Y;
+                _pathDirection = new Vector2(dx, dy);
+                _pathLength = _pathDirection.Length();
+                
+                // Skip if start and end are the same tile
+                if (_pathLength < 0.1f)
+                    return;
+                    
+                // Skip if heights are the same and we require height difference
+                if (_heightThreshold && 
+                    Math.Abs(_endTile.Tile.Z - _startTile.Tile.Z) < _minHeightDiff)
+                    return;
+                
+                // Normalize direction vector
+                _pathDirection = Vector2.Normalize(_pathDirection);
+                
+                // Preview the path
+                PreviewPath();
+            }
         }
     }
     
-    // Method to handle mouse movement during selection
-    public override void OnMouseEnter(TileObject? o)
+    // GhostClear - Required by BaseTool
+    protected override void GhostClear(TileObject? o)
     {
-        if (!_isSelecting || o is not LandObject landObject || _startTile == null)
-        {
-            base.OnMouseEnter(o);
-            return;
-        }
-        
-        // Update selection area
-        int startX = Math.Min(_startTile.Tile.X, o.Tile.X);
-        int startY = Math.Min(_startTile.Tile.Y, o.Tile.Y);
-        int endX = Math.Max(_startTile.Tile.X, o.Tile.X) + 1;
-        int endY = Math.Max(_startTile.Tile.Y, o.Tile.Y) + 1;
-        
-        _selectionArea = new Rectangle(startX, startY, endX - startX, endY - startY);
-        _endTile = o;
-        
-        // Preview the gradient
-        PreviewGradient();
-    }
-    
-    // Method to handle releasing the mouse button
-    public override void OnMouseReleased(TileObject? o)
-    {
-        if (_isSelecting && _startTile != null && _endTile != null)
+        if (_isSelecting && !Keyboard.GetState().IsKeyDown(Keys.LeftControl) && 
+            !Keyboard.GetState().IsKeyDown(Keys.RightControl))
         {
             _isSelecting = false;
-            
-            // Apply the final gradient
-            if (_selectionArea.Width > 1 || _selectionArea.Height > 1)
-            {
-                ApplyGradient();
-            }
-        }
-        else
-        {
-            base.OnMouseReleased(o);
+            _startTile = null;
+            _endTile = null;
+            ClearGhosts();
         }
     }
     
-    // Reset the selection when leaving the current tile
-    public override void OnMouseLeave(TileObject? o)
+    // InternalApply - Required by BaseTool
+    protected override void InternalApply(TileObject? o)
     {
-        if (!_isSelecting)
-        {
-            // Clear all ghost tiles
-            foreach (var pair in new Dictionary<LandObject, LandObject>(MapManager.GhostLandTiles))
-            {
-                pair.Key.Reset();
-                MapManager.GhostLandTiles.Remove(pair.Key);
-            }
-        }
-        
-        base.OnMouseLeave(o);
-    }
-    
-    // Preview the gradient with ghost tiles
-    private void PreviewGradient()
-    {
-        if (_startTile == null || _endTile == null)
+        if (_startTile == null || _endTile == null || Random.Next(100) >= _chance)
             return;
             
-        // Clear previous ghost tiles
+        // Apply the changes from ghost tiles to actual tiles
+        foreach (var pair in MapManager.GhostLandTiles)
+        {
+            pair.Key.LandTile.ReplaceLand(pair.Key.LandTile.Id, pair.Value.Tile.Z);
+        }
+        
+        // Clean up
+        ClearGhosts();
+        _isSelecting = false;
+        _startTile = null;
+        _endTile = null;
+    }
+    
+    // Clear all ghost tiles
+    private void ClearGhosts()
+    {
         foreach (var pair in new Dictionary<LandObject, LandObject>(MapManager.GhostLandTiles))
         {
             pair.Key.Reset();
             MapManager.GhostLandTiles.Remove(pair.Key);
         }
-        
-        // Calculate gradient direction and length
-        float startX = _startTile.Tile.X;
-        float startY = _startTile.Tile.Y;
-        float endX = _endTile.Tile.X;
-        float endY = _endTile.Tile.Y;
-        
-        _gradientDirection = new Vector2(endX - startX, endY - startY);
-        _gradientLength = _gradientDirection.Length();
-        
-        if (_gradientLength > 0)
-            _gradientDirection = Vector2.Normalize(_gradientDirection);
+    }
+    
+    // Preview the path with ghost tiles
+    private void PreviewPath()
+    {
+        if (_startTile == null || _endTile == null)
+            return;
             
-        _startHeight = _startTile.Tile.Z;
-        _endHeight = _endTile.Tile.Z;
+        // Clear previous ghosts
+        ClearGhosts();
         
-        // Generate ghost tiles to preview the gradient
+        // Calculate perpendicular vector for path width
+        Vector2 perpendicular = new Vector2(-_pathDirection.Y, _pathDirection.X);
+        
+        // Get tile coordinates
+        int startX = _startTile.Tile.X;
+        int startY = _startTile.Tile.Y;
+        int endX = _endTile.Tile.X; 
+        int endY = _endTile.Tile.Y;
+        
+        // Start and end heights
+        sbyte startZ = _startTile.Tile.Z;
+        sbyte endZ = _endTile.Tile.Z;
+        
+        // Determine bounding box to check
+        int minX = Math.Min(startX, endX) - _pathWidth;
+        int maxX = Math.Max(startX, endX) + _pathWidth;
+        int minY = Math.Min(startY, endY) - _pathWidth;
+        int maxY = Math.Max(startY, endY) + _pathWidth;
+        
+        // Track tiles we've modified
         Dictionary<(int, int), LandObject> pendingGhostTiles = new();
         
-        // Create ghosts for all tiles in the selection area
-        for (int x = _selectionArea.Left; x < _selectionArea.Right; x++)
+        // Check all tiles in bounding box
+        for (int x = minX; x <= maxX; x++)
         {
-            for (int y = _selectionArea.Top; y < _selectionArea.Bottom; y++)
+            for (int y = minY; y <= maxY; y++)
             {
+                // Skip if out of bounds
+                if (!Client.IsValidX((ushort)x) || !Client.IsValidY((ushort)y))
+                    continue;
+                
+                // Get the land object
                 LandObject? lo = MapManager.LandTiles[x, y];
                 if (lo == null)
                     continue;
+                
+                // Calculate the position relative to the path
+                Vector2 relPos = new Vector2(x - startX, y - startY);
+                
+                // Project onto the path direction to get distance along path
+                float projDist = Vector2.Dot(relPos, _pathDirection);
+                
+                // Calculate normalized distance (0 at start, 1 at end)
+                float normDist = Math.Clamp(projDist / _pathLength, 0, 1);
+                
+                // Project onto perpendicular to get distance from path centerline
+                float lateralDist = Math.Abs(Vector2.Dot(relPos, perpendicular));
+                
+                // Skip if too far from path
+                if (lateralDist > _pathWidth)
+                    continue;
+                
+                // Get current height
+                sbyte currentZ = lo.Tile.Z;
+                
+                // Calculate target height based on gradient
+                float factor = GetGradientFactor(normDist);
+                int targetHeight = (int)Math.Round(startZ + (endZ - startZ) * factor);
+                
+                // Apply edge fade if enabled
+                if (_useEdgeFade && lateralDist > _pathWidth - _edgeFadeWidth)
+                {
+                    float fadeDistance = lateralDist - (_pathWidth - _edgeFadeWidth);
+                    float fadeFactor = 1.0f - (fadeDistance / _edgeFadeWidth);
                     
-                // Calculate new height based on position in gradient
-                sbyte newZ = CalculateGradientHeight(x, y);
+                    // Blend between current height and target height based on fade factor
+                    targetHeight = (int)Math.Round(
+                        currentZ * (1 - fadeFactor) + targetHeight * fadeFactor
+                    );
+                }
                 
-                // Create ghost tile
-                lo.Visible = false;
-                var newTile = new LandTile(lo.LandTile.Id, lo.Tile.X, lo.Tile.Y, newZ);
-                var ghostTile = new LandObject(newTile);
+                // Respect existing terrain if enabled
+                if (_respectExistingTerrain)
+                {
+                    targetHeight = (int)Math.Round(
+                        currentZ * (1 - _blendFactor) + targetHeight * _blendFactor
+                    );
+                }
                 
-                pendingGhostTiles[(x, y)] = ghostTile;
-                MapManager.GhostLandTiles[lo] = ghostTile;
+                // Clamp to valid height range
+                targetHeight = Math.Clamp(targetHeight, -128, 127);
+                
+                // Create ghost tile if height changed
+                if (targetHeight != currentZ)
+                {
+                    sbyte newZ = (sbyte)targetHeight;
+                    lo.Visible = false;
+                    var newTile = new LandTile(lo.LandTile.Id, lo.Tile.X, lo.Tile.Y, newZ);
+                    var ghostTile = new LandObject(newTile);
+                    
+                    pendingGhostTiles[(x, y)] = ghostTile;
+                    MapManager.GhostLandTiles[lo] = ghostTile;
+                }
             }
         }
         
-        // Update all tiles for visual preview
+        // Update all ghost tiles for visual preview
         foreach (var ghostTile in pendingGhostTiles.Values)
         {
             MapManager.OnLandTileElevated(ghostTile.LandTile, ghostTile.LandTile.Z);
         }
-    }
-    
-    // Calculate height at a specific position based on gradient settings
-    private sbyte CalculateGradientHeight(int x, int y)
-    {
-        LandObject? lo = MapManager.LandTiles[x, y];
-        if (lo == null)
-            return 0;
-            
-        // Calculate position along the gradient (0.0 - 1.0)
-        float projectionDistance = CalculateProjectionDistance(x, y);
-        
-        // Calculate perpendicular distance from the gradient center line
-        float perpendicularDistance = CalculatePerpendicularDistance(x, y);
-        
-        // If outside the path width, don't modify
-        float halfPathWidth = _pathWidth / 2.0f;
-        if (perpendicularDistance > halfPathWidth)
-            return lo.Tile.Z;
-            
-        // Compute the base gradient height value
-        float gradientFactor = GetGradientFactor(projectionDistance);
-        
-        // Apply edge fade if enabled
-        if (_useEdgeFade && perpendicularDistance > halfPathWidth - _edgeFadeWidth)
-        {
-            float fadeDistance = perpendicularDistance - (halfPathWidth - _edgeFadeWidth);
-            float fadeFactor = 1.0f - (fadeDistance / _edgeFadeWidth);
-            gradientFactor = lo.Tile.Z + (gradientFactor - lo.Tile.Z) * fadeFactor;
-        }
-        
-        // Calculate target height
-        int targetHeight = (int)Math.Round(_startHeight + (_endHeight - _startHeight) * gradientFactor);
-        
-        // Blend with existing terrain if enabled
-        if (_respectExistingTerrain)
-        {
-            targetHeight = (int)Math.Round(lo.Tile.Z * (1 - _blendFactor) + targetHeight * _blendFactor);
-        }
-        
-        // Apply height limits if enabled
-        if (_useHeightLimits)
-        {
-            targetHeight = Math.Clamp(targetHeight, _minHeight, _maxHeight);
-        }
-        
-        return (sbyte)Math.Clamp(targetHeight, -128, 127);
-    }
-    
-    // Calculate the normalized distance along the gradient direction
-    private float CalculateProjectionDistance(int x, int y)
-    {
-        if (_gradientLength == 0)
-            return 0;
-            
-        Vector2 toPoint = new Vector2(x - _startTile.Tile.X, y - _startTile.Tile.Y);
-        float projection = Vector2.Dot(toPoint, _gradientDirection);
-        
-        // Clamp to 0-1 range
-        return Math.Clamp(projection / _gradientLength, 0, 1);
-    }
-    
-    // Calculate perpendicular distance from the gradient center line
-    private float CalculatePerpendicularDistance(int x, int y)
-    {
-        if (_gradientLength == 0)
-            return 0;
-            
-        Vector2 toPoint = new Vector2(x - _startTile.Tile.X, y - _startTile.Tile.Y);
-        float projection = Vector2.Dot(toPoint, _gradientDirection);
-        
-        Vector2 projectedPoint = _gradientDirection * projection;
-        return Vector2.Distance(toPoint, projectedPoint);
     }
     
     // Get gradient factor based on selected transition type
@@ -365,9 +327,9 @@ public class GradientTool : BaseTool
     {
         return _transitionType switch
         {
-            0 => t, // Linear
-            1 => SmoothStep(t), // Smooth
-            2 => SCurve(t), // S-Curve
+            0 => t,                    // Linear
+            1 => SmoothStep(t),        // Smooth
+            2 => SCurve(t),            // S-Curve
             _ => t
         };
     }
@@ -382,35 +344,5 @@ public class GradientTool : BaseTool
     private float SCurve(float t)
     {
         return t * t * t * (t * (t * 6 - 15) + 10);
-    }
-    
-    // Apply the final gradient
-    private void ApplyGradient()
-    {
-        if (_selectionArea == Rectangle.Empty)
-            return;
-            
-        // Apply the changes from ghost tiles to actual tiles
-        for (int x = _selectionArea.Left; x < _selectionArea.Right; x++)
-        {
-            for (int y = _selectionArea.Top; y < _selectionArea.Bottom; y++)
-            {
-                LandObject? lo = MapManager.LandTiles[x, y];
-                if (lo == null)
-                    continue;
-                    
-                if (MapManager.GhostLandTiles.TryGetValue(lo, out var ghostTile))
-                {
-                    lo.LandTile.ReplaceLand(lo.LandTile.Id, ghostTile.Tile.Z);
-                }
-            }
-        }
-        
-        // Clear all ghost tiles
-        foreach (var pair in new Dictionary<LandObject, LandObject>(MapManager.GhostLandTiles))
-        {
-            pair.Key.Reset();
-            MapManager.GhostLandTiles.Remove(pair.Key);
-        }
     }
 }
