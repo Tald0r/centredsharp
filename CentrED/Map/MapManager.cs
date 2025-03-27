@@ -253,19 +253,34 @@ public class MapManager
 
     public void OnLandTileElevated(LandTile tile, sbyte newZ)
     {
-        for (int x = -2; x < 2; x++)
+        // Define a larger range to properly recalculate vertices across all directions
+        int range = 3;
+        
+        // First mark the affected tile itself for recalculation
+        if (LandTiles[tile.X, tile.Y] is LandObject centerLo)
+            _ToRecalculate.Add(centerLo);
+        
+        // Then mark ALL surrounding tiles for recalculation, ensuring full coverage
+        for (int x = tile.X - range; x <= tile.X + range; x++)
         {
-            for (int y = -2; y < 2; y++)
+            for (int y = tile.Y - range; y <= tile.Y + range; y++)
             {
-                var newX = tile.X + x;
-                var newY = tile.Y + y;
-                if (!Client.IsValidX(newX) || !Client.IsValidY(newY))
+                if (!Client.IsValidX((ushort)x) || !Client.IsValidY((ushort)y))
                     continue;
 
-                var landObject = LandTiles[newX, newY];
-                if (landObject != null)
+                if (LandTiles[x, y] is LandObject landObject)
                 {
                     _ToRecalculate.Add(landObject);
+                    
+                    // For ghost tiles, also mark the corresponding original tile
+                    if (GhostLandTiles.Values.Contains(landObject))
+                    {
+                        foreach (var pair in GhostLandTiles)
+                        {
+                            if (pair.Value == landObject && pair.Key != null)
+                                _ToRecalculate.Add(pair.Key);
+                        }
+                    }
                 }
             }
         }
