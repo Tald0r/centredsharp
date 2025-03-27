@@ -129,17 +129,19 @@ public class GradientTool : BaseTool
         
         bool ctrlPressed = Keyboard.GetState().IsKeyDown(Keys.LeftControl) || 
                            Keyboard.GetState().IsKeyDown(Keys.RightControl);
+        bool leftMousePressed = Mouse.GetState().LeftButton == ButtonState.Pressed;
         
+        // Only start selection when CTRL+Left mouse button is pressed
         if (ctrlPressed) 
         {
-            if (!_isSelecting)
+            if (!_isSelecting && leftMousePressed)
             {
-                // First click - set the start point
+                // First click - set the start point (require mouse button press)
                 _isSelecting = true;
                 _startTile = o;
                 ClearGhosts(); // Clear any existing ghosts
             }
-            else if (_startTile != null)
+            else if (_isSelecting && _startTile != null)
             {
                 // Update the end point as we drag
                 _endTile = o;
@@ -241,6 +243,9 @@ public class GradientTool : BaseTool
         // Track tiles we've modified
         Dictionary<(int, int), LandObject> pendingGhostTiles = new();
         
+        // Calculate total path length for proper normalization
+        float totalPathLength = _pathLength; // Already calculated in GhostApply
+        
         // Check all tiles in bounding box
         for (int x = minX; x <= maxX; x++)
         {
@@ -262,7 +267,11 @@ public class GradientTool : BaseTool
                 float projDist = Vector2.Dot(relPos, _pathDirection);
                 
                 // Calculate normalized distance (0 at start, 1 at end)
-                float normDist = Math.Clamp(projDist / _pathLength, 0, 1);
+                // This is the key fix - properly normalize regardless of direction
+                float normDist = projDist / totalPathLength;
+                
+                // Clamp to 0-1 range after calculating the normalized distance
+                normDist = Math.Clamp(normDist, 0, 1);
                 
                 // Project onto perpendicular to get distance from path centerline
                 float lateralDist = Math.Abs(Vector2.Dot(relPos, perpendicular));
