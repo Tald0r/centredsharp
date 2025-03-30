@@ -157,111 +157,103 @@ public class GradientTool : BaseTool
                 _isSelecting = true;
                 _isDragging = true;
                 _startTile = o;
+                _endTile = o; // Initialize end tile to start tile
                 _pathGenerated = false;
                 ClearGhosts();
+                
+                // Start tracking area operation - critical for all directions
+                OnAreaOperationStart((ushort)o.Tile.X, (ushort)o.Tile.Y);
+                Console.WriteLine($"Starting at ({o.Tile.X}, {o.Tile.Y})");
             }
-            else if (_isSelecting && _isDragging && leftMousePressed && _startTile != null)
+            else if (_isSelecting && leftMousePressed && _startTile != null)
             {
-                // Update the end point as we drag
-                if (_endTile?.Tile.X != o.Tile.X || _endTile?.Tile.Y != o.Tile.Y)
+                // Always update end point as we drag, even if same tile
+                _endTile = o;
+                
+                // Update area operation - critical for tracking
+                OnAreaOperationUpdate((ushort)o.Tile.X, (ushort)o.Tile.Y);
+                Console.WriteLine($"Dragging to ({o.Tile.X}, {o.Tile.Y})");
+                
+                // Calculate path direction and length
+                float dx = _endTile.Tile.X - _startTile.Tile.X;
+                float dy = _endTile.Tile.Y - _startTile.Tile.Y;
+                _pathDirection = new Vector2(dx, dy);
+                _pathLength = _pathDirection.Length();
+                
+                // Skip if start and end are the same tile
+                if (_pathLength < 0.1f)
+                    return;
+                
+                // Always regenerate the path when mouse moves
+                // This is key to making it work in all quadrants
+                _pathGenerated = false;
+                
+                // Limit maximum path length to prevent lag
+                if (_pathLength > _maxPathLength)
                 {
-                    _endTile = o;
-                    _pathGenerated = false;  // Set to false so we generate a new path
-                    
-                    // Calculate path direction and length
-                    float dx = _endTile.Tile.X - _startTile.Tile.X;
-                    float dy = _endTile.Tile.Y - _startTile.Tile.Y;
+                    // Scale down the path to maximum allowed length
+                    float scaleFactor = _maxPathLength / _pathLength;
+                    dx = (int)(dx * scaleFactor);
+                    dy = (int)(dy * scaleFactor);
+                    _endTile = new LandObject(new LandTile(0, 
+                                        (ushort)(_startTile.Tile.X + dx), 
+                                        (ushort)(_startTile.Tile.Y + dy),
+                                        o.Tile.Z));
                     _pathDirection = new Vector2(dx, dy);
                     _pathLength = _pathDirection.Length();
                     
-                    // Skip if start and end are the same tile
-                    if (_pathLength < 0.1f)
-                        return;
-                    
-                    // Limit maximum path length to prevent lag
-                    if (_pathLength > _maxPathLength)
-                    {
-                        // Scale down the path to maximum allowed length
-                        float scaleFactor = _maxPathLength / _pathLength;
-                        dx = (int)(dx * scaleFactor);
-                        dy = (int)(dy * scaleFactor);
-                        _endTile = new LandObject(new LandTile(0, 
-                                                (ushort)(_startTile.Tile.X + dx), 
-                                                (ushort)(_startTile.Tile.Y + dy),
-                                                o.Tile.Z));
-                        _pathDirection = new Vector2(dx, dy);
-                        _pathLength = _pathDirection.Length();
-                    }
-                    
-                    // Normalize direction vector
-                    if (_pathLength > 0)
-                        _pathDirection = Vector2.Normalize(_pathDirection);
-                    
-                    // Only generate new path if end point has moved
-                    if (!_pathGenerated)
-                    {
-                        PreviewPath();
-                        _pathGenerated = true;  // Mark path as generated to prevent constant updates
-                    }
+                    // Make sure to update area operation with new endpoint
+                    OnAreaOperationUpdate((ushort)_endTile.Tile.X, (ushort)_endTile.Tile.Y);
+                }
+                
+                // Normalize direction vector
+                if (_pathLength > 0)
+                    _pathDirection = Vector2.Normalize(_pathDirection);
+                
+                // Generate new path every time the mouse moves (important!)
+                if (!_pathGenerated)
+                {
+                    PreviewPath();
+                    _pathGenerated = true;
                 }
             }
         }
+        else if (_isSelecting)
+        {
+            // If Ctrl is released while selecting, end the operation
+            _isSelecting = false;
+            _isDragging = false;
+            OnAreaOperationEnd();
+        }
     }
     
-    // GhostClear - Required by BaseTool
+    // Update GhostClear to handle events properly
     protected override void GhostClear(TileObject? o)
     {
-        // When Ctrl key is released, stop selecting but keep the path visible
+        // When Ctrl key is released, end the area operation
         if (_isSelecting && !Keyboard.GetState().IsKeyDown(Keys.LeftControl) && 
             !Keyboard.GetState().IsKeyDown(Keys.RightControl))
         {
             _isSelecting = false;
             _isDragging = false;
-            // Keep _startTile and _endTile - they determine the path
+            OnAreaOperationEnd();
         }
         
-        // When left mouse button is released, end dragging state
+        // When left mouse button is released, apply the changes
         if (_isDragging && Mouse.GetState().LeftButton == ButtonState.Released)
         {
             _isDragging = false;
-        }
-    }
-    
-    // Instead of overriding OnMouseReleased, handle mouse button state in GhostClear and GhostApply
-    // This avoids the compilation error with sealed method
-    
-    // InternalApply - Required by BaseTool
-    protected override void InternalApply(TileObject? o)
-    {
-        if (_startTile == null || _endTile == null || Random.Next(100) >= _chance)
-            return;
             
-        // Apply the changes from ghost tiles to actual tiles
-        foreach (var pair in MapManager.GhostLandTiles)
-        {
-            pair.Key.LandTile.ReplaceLand(pair.Key.LandTile.Id, pair.Value.Tile.Z);
-        }
-        
-        // Clean up
-        ClearGhosts();
-        _isSelecting = false;
-        _isDragging = false;
-        _startTile = null;
-        _endTile = null;
-        _pathGenerated = false;
-    }
-    
-    // Clear all ghost tiles
-    private void ClearGhosts()
-    {
-        foreach (var pair in new Dictionary<LandObject, LandObject>(MapManager.GhostLandTiles))
-        {
-            pair.Key.Reset();
-            MapManager.GhostLandTiles.Remove(pair.Key);
+            // This is important: ensure area operation is properly closed
+            if (_isSelecting)
+            {
+                _isSelecting = false;
+                OnAreaOperationEnd();
+            }
         }
     }
     
-    // Preview the path with ghost tiles
+    // Fix PreviewPath to use area operation coordinates correctly
     private void PreviewPath()
     {
         if (_startTile == null || _endTile == null)
@@ -270,11 +262,13 @@ public class GradientTool : BaseTool
         // Clear previous ghosts
         ClearGhosts();
         
-        // Get tile coordinates
-        int startX = _startTile.Tile.X;
-        int startY = _startTile.Tile.Y;
-        int endX = _endTile.Tile.X; 
-        int endY = _endTile.Tile.Y;
+        // Get tile coordinates - MUST use BaseTool's area coordinates for consistency
+        int startX = AreaStartX;
+        int startY = AreaStartY;
+        int endX = AreaEndX;
+        int endY = AreaEndY;
+        
+        Console.WriteLine($"Preview Path: ({startX},{startY}) to ({endX},{endY})");
         
         // Start and end heights
         sbyte startZ = _startTile.Tile.Z;
@@ -287,31 +281,31 @@ public class GradientTool : BaseTool
             endZ = (sbyte)Math.Min(startZ + _forcedHeightDiff, 127);
         }
         
-        // Calculate direction vector
+        // Calculate path vector
         Vector2 pathVector = new Vector2(endX - startX, endY - startY);
         float pathLength = pathVector.Length();
-        
-        // Debug output
-        Console.WriteLine($"===== NEW PATH =====");
-        Console.WriteLine($"Start: ({startX},{startY}) Z:{startZ}");
-        Console.WriteLine($"End: ({endX},{endY}) Z:{endZ}");
-        Console.WriteLine($"Direction: ({pathVector.X},{pathVector.Y})");
         
         if (pathLength < 0.001f)
             return;
         
-        // Create modified tiles
+        // Create modified tiles with BaseTool's coordinates
         GeneratePathTiles(startX, startY, endX, endY, startZ, endZ);
     }
 
     // Generate path tiles using a better, universal algorithm
     private void GeneratePathTiles(int startX, int startY, int endX, int endY, sbyte startZ, sbyte endZ)
     {
-        // Start area operation tracking in BaseTool
+        // Start area operation tracking in BaseTool - this sets AreaStartX, AreaStartY
         OnAreaOperationStart((ushort)startX, (ushort)startY);
         OnAreaOperationUpdate((ushort)endX, (ushort)endY);
 
-        // Create a bounding box with padding
+        // Use BaseTool's stored coordinates for consistency
+        startX = AreaStartX;
+        startY = AreaStartY;
+        endX = AreaEndX;
+        endY = AreaEndY;
+
+        // Create a bounding box with padding for the gradient area
         int padding = _pathWidth + 2;
         int minX = Math.Min(startX, endX) - padding;
         int maxX = Math.Max(startX, endX) + padding;
@@ -321,7 +315,7 @@ public class GradientTool : BaseTool
         Console.WriteLine($"Scanning area: ({minX},{minY}) to ({maxX},{maxY})");
         Console.WriteLine($"Path width: {_pathWidth}");
         
-        // Calculate path vector and normalization factors
+        // Calculate path vector using BaseTool's coordinates
         float dx = endX - startX;
         float dy = endY - startY;
         float pathLengthSquared = dx * dx + dy * dy;
@@ -332,7 +326,7 @@ public class GradientTool : BaseTool
         // Track tiles modified in each quadrant for debugging
         int nwCount = 0, neCount = 0, swCount = 0, seCount = 0;
         
-        // Create line equation ax + by + c = 0
+        // Create line equation ax + by + c = 0 for distance calculation
         float a = endY - startY;
         float b = startX - endX;
         float c = endX * startY - startX * endY;
@@ -362,16 +356,20 @@ public class GradientTool : BaseTool
                 // Calculate position along the path (parameter t)
                 float t;
                 
+                // Important: Always calculate relative to start point consistently
+                int normX = x - startX;
+                int normY = y - startY;
+                
                 // Choose the most stable calculation method based on path direction
                 if (Math.Abs(dx) > Math.Abs(dy))
                 {
-                    // More horizontal path
-                    t = (x - startX) / dx;
+                    // More horizontal path - avoid division by zero
+                    t = dx != 0 ? normX / dx : 0;
                 }
                 else
                 {
-                    // More vertical path
-                    t = (y - startY) / dy;
+                    // More vertical path - avoid division by zero
+                    t = dy != 0 ? normY / dy : 0;
                 }
                 
                 // Skip if outside path segment (not between start and end)
@@ -405,16 +403,17 @@ public class GradientTool : BaseTool
                     var newTile = new LandTile(lo.LandTile.Id, lo.Tile.X, lo.Tile.Y, newZ);
                     var ghostTile = new LandObject(newTile);
                     
-                    // Use normalized coordinates for quadrant detection
-                    float normalizedX = x - startX;
-                    float normalizedY = y - startY;
+                    // Use normalized coordinates for quadrant detection - always relative to start!
+                    // This matches how BaseTool's GetSequentialTileId works
+                    bool isXPositive = normX >= 0;
+                    bool isYPositive = normY >= 0;
                     
                     // Count quadrants for reporting purposes
-                    if (normalizedX >= 0) {
-                        if (normalizedY >= 0) seCount++;
+                    if (isXPositive) {
+                        if (isYPositive) seCount++;
                         else neCount++;
                     } else {
-                        if (normalizedY >= 0) swCount++;
+                        if (isYPositive) swCount++;
                         else nwCount++;
                     }
                     
@@ -480,5 +479,38 @@ public class GradientTool : BaseTool
     private float SCurve(float t)
     {
         return t * t * t * (t * (t * 6 - 15) + 10);
+    }
+
+    protected override void InternalApply(TileObject? o)
+    {
+        // Don't check for chance here, as we want to apply all ghost tiles
+        if (_startTile == null || _endTile == null)
+            return;
+    
+        Console.WriteLine($"Applying changes from {MapManager.GhostLandTiles.Count} ghost tiles");
+            
+        // Apply the changes from ghost tiles to actual tiles
+        foreach (var pair in new Dictionary<LandObject, LandObject>(MapManager.GhostLandTiles))
+        {
+            pair.Key.LandTile.ReplaceLand(pair.Key.LandTile.Id, pair.Value.Tile.Z);
+        }
+    
+        // Clean up
+        ClearGhosts();
+        _startTile = null;
+        _endTile = null;
+        _pathGenerated = false;
+    }
+    
+    private void ClearGhosts()
+    {
+        // Clear any existing ghost tiles
+        foreach (var pair in new Dictionary<LandObject, LandObject>(MapManager.GhostLandTiles))
+        {
+            pair.Key.Visible = true;
+        }
+        
+        MapManager.GhostLandTiles.Clear();
+        MapManager.GhostStaticTiles.Clear();
     }
 }
