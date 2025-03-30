@@ -17,204 +17,193 @@ public class GradientTool : BaseTool
     // Selection state
     private bool _isSelecting = false;
     private bool _isDragging = false;
-    private TileObject? _startTile = null;     // Anchor/center point
-    private TileObject? _endTile = null;       // Target endpoint
-    private bool _pathGenerated = false;       // Flag to prevent constant updates
-    
-    // Path settings
-    private int _transitionType = 0;           // 0=Linear, 1=Smooth, 2=S-Curve
-    private int _pathWidth = 5;                // Width of path in tiles
-    private bool _useEdgeFade = true;          // Fade edges of path
-    private int _edgeFadeWidth = 2;            // Width of fade area in tiles
-    private int _forcedHeightDiff = 5;         // Default height difference when start/end are the same
-    private bool _respectExistingTerrain = true;
-    private float _blendFactor = 0.5f;
-    
-    // Path limits - prevents excessive tiles being modified
-    private int _maxPathLength = 50;           // Maximum number of tiles in a single path
-    
-    // Internal calculation fields
-    private Vector2 _pathDirection;            // Direction vector from start to end
-    private float _pathLength;                 // Length of path in tiles
-    private bool _isFirstGradient;            // Tracks first tile placement in gradient
+    private TileObject? _startTile = null;
+    private TileObject? _endTile = null;
+    private TileObject? _lastProcessedEndTile = null; // Track last processed endpoint
 
-    // Main drawing UI
+    // Path settings - SIMPLIFIED
+    private int _pathWidth = 5;                // Width of path in tiles
+    private bool _showAdvancedOptions = false; // Toggle for showing advanced options
+
+    // Internal calculation fields
+    private Vector2 _pathDirection;
+    private float _pathLength;
+    private Vector2 _lastPathEnd = new Vector2(0, 0); // Track last end position
+    private Vector2 _lastSignificantEnd = new Vector2(0, 0); // Last endpoint that triggered a path update
+
+    // Optimization to reduce excessive recalculations
+    private int _updateCounter = 0;
+    private const int UPDATE_THRESHOLD = 8; // Increase threshold further to reduce updates
+    private const int MIN_DISTANCE_THRESHOLD = 3; // Minimum distance before recalculating
+    private DateTime _lastUpdateTime = DateTime.MinValue;
+    private const int MIN_UPDATE_MS = 300; // Minimum time between updates in milliseconds
+
+    // DEBUG options
+    private bool _showDebugInfo = true;
+    private int _debugLevel = 1;  // 1=Basic info only, 2=Metrics, 3=Detailed
+
+    // Main drawing UI - SIMPLIFIED
     internal override void Draw()
     {
         ImGui.Text("Path Settings");
-        ImGui.BeginChild("PathSettings", new System.Numerics.Vector2(-1, 210), ImGuiChildFlags.Border);
-        
-        // Transition type dropdown
-        ImGui.Text("Transition Type:");
-        ImGui.SameLine(140);
-        ImGui.SetNextItemWidth(150);
-        
-        string[] transitionTypes = { "Linear", "Smooth", "S-Curve" };
-        if (ImGui.BeginCombo("##transitionType", transitionTypes[_transitionType]))
-        {
-            for (int i = 0; i < transitionTypes.Length; i++)
-            {
-                bool isSelected = (_transitionType == i);
-                if (ImGui.Selectable(transitionTypes[i], isSelected))
-                    _transitionType = i;
-                
-                if (isSelected)
-                    ImGui.SetItemDefaultFocus();
-            }
-            ImGui.EndCombo();
-        }
-        
-        // Path width
+        ImGui.BeginChild("PathSettings", new System.Numerics.Vector2(-1, 120), ImGuiChildFlags.Border);
+
+        // Path width setting
         ImGui.Text("Path Width:");
         ImGui.SameLine(140);
         ImGui.SetNextItemWidth(150);
         ImGui.InputInt("##pathWidth", ref _pathWidth);
         if (_pathWidth < 1) _pathWidth = 1;
-        if (_pathWidth > 20) _pathWidth = 20;  // Limit max width
-        
-        // Default height change (for paths with same elevation)
-        ImGui.Text("Default Height:");
-        ImGui.SameLine(140);
-        ImGui.SetNextItemWidth(150);
-        ImGui.InputInt("##forcedHeightDiff", ref _forcedHeightDiff);
-        if (_forcedHeightDiff < 1) _forcedHeightDiff = 1;
-        
-        // Edge fade
-        ImGui.Checkbox("Edge Fade", ref _useEdgeFade);
-        if (_useEdgeFade)
+        if (_pathWidth > 20) _pathWidth = 20;
+
+        // Replace manual reverse option with advanced options toggle
+        if (ImGui.Checkbox("Show Advanced Options", ref _showAdvancedOptions))
         {
-            ImGui.SameLine(140);
-            ImGui.SetNextItemWidth(150);
-            ImGui.InputInt("Fade Width", ref _edgeFadeWidth);
-            if (_edgeFadeWidth < 1) _edgeFadeWidth = 1;
+            // Toggle advanced options
         }
         
-        // Terrain blending
-        ImGui.Checkbox("Respect Existing Terrain", ref _respectExistingTerrain);
-        if (_respectExistingTerrain)
+        // Only display advanced diagnostic info if selected
+        if (_showAdvancedOptions)
         {
-            ImGui.SameLine(140);
-            ImGui.SetNextItemWidth(150);
-            ImGui.SliderFloat("Blend Factor", ref _blendFactor, 0.0f, 1.0f, "%.2f");
+            ImGui.Checkbox("Show Debug Info", ref _showDebugInfo);
+            if (_showDebugInfo)
+            {
+                ImGui.SameLine(140);
+                ImGui.SetNextItemWidth(150);
+                ImGui.SliderInt("Detail Level", ref _debugLevel, 1, 3);
+            }
         }
-        
-        // Maximum path length
-        ImGui.Text("Max Path Length:");
-        ImGui.SameLine(140);
-        ImGui.SetNextItemWidth(150);
-        ImGui.InputInt("##maxPathLength", ref _maxPathLength);
-        if (_maxPathLength < 10) _maxPathLength = 10;
-        if (_maxPathLength > 100) _maxPathLength = 100;
-        
+        else
+        {
+            // Keep debug info but don't show it
+            _showDebugInfo = false;
+        }
+
         ImGui.EndChild();
-        
+
         ImGui.Spacing();
-        
+
         // Instructions
         ImGui.TextWrapped("Hold CTRL and click to set the start point, then drag to create a path to your target area.");
-        ImGui.TextWrapped("The tool will create a smooth height transition between different elevations.");
-        
+
         // Show current selection status
         if (_startTile != null && _endTile != null)
         {
             ImGui.Separator();
             ImGui.Text($"Start: ({_startTile.Tile.X},{_startTile.Tile.Y}, Z:{_startTile.Tile.Z})");
             ImGui.Text($"End: ({_endTile.Tile.X},{_endTile.Tile.Y}, Z:{_endTile.Tile.Z})");
-            
+
             int actualHeightDiff = Math.Abs(_endTile.Tile.Z - _startTile.Tile.Z);
-            int displayHeightDiff = actualHeightDiff;
-            
-            // If heights are the same, show the forced diff
-            if (actualHeightDiff == 0)
-                displayHeightDiff = _forcedHeightDiff;
-                
+            int displayHeightDiff = actualHeightDiff == 0 ? 5 : actualHeightDiff;
+
             ImGui.Text($"Height Difference: {displayHeightDiff} tiles");
-            
+
             if (_pathLength > 0 && displayHeightDiff > 0)
             {
                 float slope = displayHeightDiff / _pathLength;
-                ImGui.Text($"Average Slope: {slope:F2} (1:{(1/slope):F1})");
+                ImGui.Text($"Average Slope: {slope:F2} (1:{(1 / slope):F1})");
             }
         }
     }
-    
-    // GhostApply - Required by BaseTool
+
+    // GhostApply with improved debug output and optimization
     protected override void GhostApply(TileObject? o)
     {
         if (o is not LandObject landObject)
             return;
-        
-        bool ctrlPressed = Keyboard.GetState().IsKeyDown(Keys.LeftControl) || 
+
+        bool ctrlPressed = Keyboard.GetState().IsKeyDown(Keys.LeftControl) ||
                            Keyboard.GetState().IsKeyDown(Keys.RightControl);
         bool leftMousePressed = Mouse.GetState().LeftButton == ButtonState.Pressed;
-        
-        // Only start selection when CTRL+Left mouse button is pressed
-        if (ctrlPressed) 
+
+        if (ctrlPressed)
         {
             if (!_isSelecting && leftMousePressed)
             {
-                // First click - set the start point
+                // First click - set the start point - THIS IS THE ANCHOR POINT FOR ALL CALCULATIONS
                 _isSelecting = true;
                 _isDragging = true;
                 _startTile = o;
-                _endTile = o; // Initialize end tile to start tile
-                _pathGenerated = false;
+                _endTile = o; 
+                _lastProcessedEndTile = null;
+                _lastPathEnd = new Vector2(o.Tile.X, o.Tile.Y);
+                _lastSignificantEnd = _lastPathEnd;
+                _lastUpdateTime = DateTime.Now;
                 ClearGhosts();
-                
-                // Start tracking area operation - critical for all directions
+                _updateCounter = 0;
+
+                // Area operation tracking - THIS IS KEY FOR SEQUENTIAL LOGIC
                 OnAreaOperationStart((ushort)o.Tile.X, (ushort)o.Tile.Y);
-                Console.WriteLine($"Starting at ({o.Tile.X}, {o.Tile.Y})");
+                if (_showDebugInfo) Console.WriteLine($"[GRAD] Start: ({o.Tile.X}, {o.Tile.Y})");
             }
             else if (_isSelecting && leftMousePressed && _startTile != null)
             {
-                // Always update end point as we drag, even if same tile
-                _endTile = o;
-                
-                // Update area operation - critical for tracking
-                OnAreaOperationUpdate((ushort)o.Tile.X, (ushort)o.Tile.Y);
-                Console.WriteLine($"Dragging to ({o.Tile.X}, {o.Tile.Y})");
-                
-                // Calculate path direction and length
-                float dx = _endTile.Tile.X - _startTile.Tile.X;
-                float dy = _endTile.Tile.Y - _startTile.Tile.Y;
-                _pathDirection = new Vector2(dx, dy);
-                _pathLength = _pathDirection.Length();
-                
-                // Skip if start and end are the same tile
-                if (_pathLength < 0.1f)
-                    return;
-                
-                // Always regenerate the path when mouse moves
-                // This is key to making it work in all quadrants
-                _pathGenerated = false;
-                
-                // Limit maximum path length to prevent lag
-                if (_pathLength > _maxPathLength)
+                // Always update end point as we drag
+                bool endPointChanged = (_endTile == null ||
+                                       _endTile.Tile.X != o.Tile.X ||
+                                       _endTile.Tile.Y != o.Tile.Y);
+
+                if (endPointChanged)
                 {
-                    // Scale down the path to maximum allowed length
-                    float scaleFactor = _maxPathLength / _pathLength;
-                    dx = (int)(dx * scaleFactor);
-                    dy = (int)(dy * scaleFactor);
-                    _endTile = new LandObject(new LandTile(0, 
-                                        (ushort)(_startTile.Tile.X + dx), 
-                                        (ushort)(_startTile.Tile.Y + dy),
-                                        o.Tile.Z));
+                    // End point changed - update tracking
+                    _endTile = o;
+
+                    // Update area operation tracking - THIS FOLLOWS THE DRAWTOOL PATTERN
+                    OnAreaOperationUpdate((ushort)o.Tile.X, (ushort)o.Tile.Y);
+
+                    // Calculate path vector FROM THE START TILE (fixed anchor point)
+                    float dx = _endTile.Tile.X - _startTile.Tile.X;
+                    float dy = _endTile.Tile.Y - _startTile.Tile.Y;
                     _pathDirection = new Vector2(dx, dy);
                     _pathLength = _pathDirection.Length();
+
+                    if (_pathLength < 0.1f)
+                        return;
+
+                    // Current position and distance checks
+                    Vector2 currentPos = new Vector2(_endTile.Tile.X, _endTile.Tile.Y);
+                    float distFromSignificant = Vector2.Distance(_lastSignificantEnd, currentPos);
+                    TimeSpan timeSinceLastUpdate = DateTime.Now - _lastUpdateTime;
+
+                    // Multi-stage throttling:
+                    // 1. Must pass update counter threshold 
+                    // 2. Must have moved enough distance from last significant point OR
+                    // 3. Sufficient time has passed since last update
+                    _updateCounter++;
+                    bool timeThresholdMet = timeSinceLastUpdate.TotalMilliseconds > MIN_UPDATE_MS;
+                    bool distanceThresholdMet = distFromSignificant >= MIN_DISTANCE_THRESHOLD;
+                    bool counterThresholdMet = _updateCounter >= UPDATE_THRESHOLD;
                     
-                    // Make sure to update area operation with new endpoint
-                    OnAreaOperationUpdate((ushort)_endTile.Tile.X, (ushort)_endTile.Tile.Y);
-                }
-                
-                // Normalize direction vector
-                if (_pathLength > 0)
-                    _pathDirection = Vector2.Normalize(_pathDirection);
-                
-                // Generate new path every time the mouse moves (important!)
-                if (!_pathGenerated)
-                {
+                    // Combine criteria - must meet counter threshold AND (distance OR time threshold)
+                    bool shouldUpdate = counterThresholdMet && (distanceThresholdMet || timeThresholdMet);
+
+                    // Override for very large movements - important for usability
+                    if (distFromSignificant >= MIN_DISTANCE_THRESHOLD * 2)
+                        shouldUpdate = true;
+
+                    if (!shouldUpdate)
+                    {
+                        _lastPathEnd = currentPos; // Track position even when not updating
+                        return; // Skip this update
+                    }
+
+                    // Reset state for new update
+                    _updateCounter = 0;
+                    _lastPathEnd = currentPos;
+                    _lastSignificantEnd = currentPos; // This is a significant position
+                    _lastUpdateTime = DateTime.Now;
+                    _lastProcessedEndTile = _endTile;
+
+                    // Debug output for direction vector - only at level 2+
+                    if (_showDebugInfo && _debugLevel >= 2)
+                        Console.WriteLine($"[GRAD] Vector: ({dx:F0},{dy:F0}) Len={_pathLength:F1}");
+
+                    // Normalize path direction
+                    if (_pathLength > 0)
+                        _pathDirection = Vector2.Normalize(_pathDirection);
+
+                    // Generate the path since the end point changed significantly
                     PreviewPath();
-                    _pathGenerated = true;
                 }
             }
         }
@@ -223,28 +212,26 @@ public class GradientTool : BaseTool
             // If Ctrl is released while selecting, end the operation
             _isSelecting = false;
             _isDragging = false;
-            OnAreaOperationEnd();
+            OnAreaOperationEnd(); // End area operation tracking
         }
     }
-    
-    // Update GhostClear to handle events properly
+
     protected override void GhostClear(TileObject? o)
     {
         // When Ctrl key is released, end the area operation
-        if (_isSelecting && !Keyboard.GetState().IsKeyDown(Keys.LeftControl) && 
+        if (_isSelecting && !Keyboard.GetState().IsKeyDown(Keys.LeftControl) &&
             !Keyboard.GetState().IsKeyDown(Keys.RightControl))
         {
             _isSelecting = false;
             _isDragging = false;
             OnAreaOperationEnd();
         }
-        
+
         // When left mouse button is released, apply the changes
         if (_isDragging && Mouse.GetState().LeftButton == ButtonState.Released)
         {
             _isDragging = false;
-            
-            // This is important: ensure area operation is properly closed
+
             if (_isSelecting)
             {
                 _isSelecting = false;
@@ -252,52 +239,44 @@ public class GradientTool : BaseTool
             }
         }
     }
-    
-    // Fix PreviewPath to use area operation coordinates correctly
+
     private void PreviewPath()
     {
         if (_startTile == null || _endTile == null)
             return;
-            
-        // Clear previous ghosts
+
         ClearGhosts();
-        
-        // Get tile coordinates - MUST use BaseTool's area coordinates for consistency
+
         int startX = AreaStartX;
         int startY = AreaStartY;
         int endX = AreaEndX;
         int endY = AreaEndY;
-        
-        Console.WriteLine($"Preview Path: ({startX},{startY}) to ({endX},{endY})");
-        
+
+        // Log once at beginning of generation
+        if (_showDebugInfo)
+            Console.WriteLine($"[GRAD] Path: ({startX},{startY}) -> ({endX},{endY})");
+
         // Start and end heights
         sbyte startZ = _startTile.Tile.Z;
         sbyte endZ = _endTile.Tile.Z;
-        
-        // Force height difference if needed (for same-height paths)
+
+        // Force height difference if same Z (using fixed value of 5)
         if (startZ == endZ)
-        {
-            // Just move the end point up by the forced difference amount
-            endZ = (sbyte)Math.Min(startZ + _forcedHeightDiff, 127);
-        }
-        
+            endZ = (sbyte)Math.Min(startZ + 5, 127);
+
         // Calculate path vector
         Vector2 pathVector = new Vector2(endX - startX, endY - startY);
         float pathLength = pathVector.Length();
-        
+
         if (pathLength < 0.001f)
             return;
-        
-        // Create modified tiles with BaseTool's coordinates
+
         GeneratePathTiles(startX, startY, endX, endY, startZ, endZ);
     }
 
-    // Generate path tiles using a better, universal algorithm
+    // Generate path tiles properly based on the first click (start point)
     private void GeneratePathTiles(int startX, int startY, int endX, int endY, sbyte startZ, sbyte endZ)
     {
-        // DO NOT start area operation tracking again - we already did this in GhostApply
-        // Use the coordinates directly - they've already been updated through OnAreaOperation calls
-
         // Create a bounding box with padding for the gradient area
         int padding = _pathWidth + 2;
         int minX = Math.Min(startX, endX) - padding;
@@ -305,36 +284,113 @@ public class GradientTool : BaseTool
         int minY = Math.Min(startY, endY) - padding;
         int maxY = Math.Max(startY, endY) + padding;
         
-        Console.WriteLine($"Scanning area: ({minX},{minY}) to ({maxX},{maxY})");
-        Console.WriteLine($"Path: ({startX},{startY}) to ({endX},{endY})");
-        
-        // Calculate path vector
-        float dx = endX - startX;
-        float dy = endY - startY;
+        // Only show scan area at debug level 3+
+        if (_showDebugInfo && _debugLevel >= 3)
+            Console.WriteLine($"[GRAD] Scan: ({minX},{minY})→({maxX},{maxY})");
+
+        // Calculate path vector - ALWAYS FROM START TO END
+        float dx = endX - startX; 
+        float dy = endY - startY; 
         float pathLength = (float)Math.Sqrt(dx * dx + dy * dy);
-        
+
         if (pathLength < 0.001f)
             return;
+
+        // Save original non-normalized direction for debugging
+        float originalDx = dx;
+        float originalDy = dy;
+
+        // Calculate path angle in world space coordinates
+        float angle = (float)Math.Atan2(dy, dx);
         
+        // Check if we're going in problematic directions (essentially negative X or Y)
+        bool isNorthish = dy < 0;
+        bool isWestish = dx < 0;
+        
+        // Get absolute angle from 0-90 degrees to determine cardinal direction
+        float absAngle = Math.Abs(angle);
+        bool isMoreHorizontal = absAngle < 0.78f || absAngle > 2.35f; // E-W dominant
+        bool isMoreVertical = absAngle >= 0.78f && absAngle <= 2.35f;  // N-S dominant
+
+        // Auto-reverse logic:
+        // 1. Always reverse for NORTH-dominant (negative Y with more vertical angle)
+        // 2. Always reverse for WEST-dominant (negative X with more horizontal angle)
+        bool shouldReverseCalculation = (isNorthish && isMoreVertical) || (isWestish && isMoreHorizontal);
+        
+        // If automatic detection suggests to reverse the path calculation
+        if (shouldReverseCalculation)
+        {
+            // Swap the direction vector but keep the same endpoints
+            dx = -dx;
+            dy = -dy;
+            
+            // Also swap the heights to maintain correct gradient
+            (startZ, endZ) = (endZ, startZ);
+            
+            // Recalculate angle with reversed direction
+            angle = (float)Math.Atan2(dy, dx);
+            
+            if (_showDebugInfo && _debugLevel >= 2)
+                Console.WriteLine($"[GRAD] Auto-reversed direction for better results");
+        }
+
+        // Create normalized direction vector for the path
+        float ndx = dx / pathLength;
+        float ndy = dy / pathLength;
+        
+        // Direction info for debugging
+        string direction = "";
+        if (angle < -2.35f || angle > 2.35f) direction = "WEST";
+        else if (angle < -0.78f) direction = "NORTH";
+        else if (angle < 0.78f) direction = "EAST";
+        else if (angle < 2.35f) direction = "SOUTH";
+        
+        if (_showDebugInfo && _debugLevel >= 2)
+            Console.WriteLine($"[GRAD] Direction: {direction} (angle: {angle:F2}) Auto-reversed: {shouldReverseCalculation}");
+            
+        // Extra debugging to understand directional pattern
+        if (_showDebugInfo && _debugLevel >= 3)
+            Console.WriteLine($"[GRAD] Original vector: ({originalDx:F1},{originalDy:F1}) → Adjusted: ({dx:F1},{dy:F1})");
+
         // Dictionary to track modified tiles
         Dictionary<(int, int), LandObject> pendingGhostTiles = new();
-        
+
         // Track tiles modified in each quadrant for debugging
         int nwCount = 0, neCount = 0, swCount = 0, seCount = 0;
+
+        // Use the same constant for isometric calculations as elsewhere in the codebase
+        float rsqrt2 = TileObject.RSQRT2;
         
-        // Create line equation ax + by + c = 0 for perpendicular distance
-        float a = dy;  // endY - startY
-        float b = -dx; // startX - endX
-        float c = endX * startY - startX * endY;
-        float lineLengthFactor = pathLength; // Already calculated above
+        // Base path width adjustments
+        float adjustedWidth = _pathWidth;
         
-        // Track the direction of the path - important for quadrant handling
-        bool isPathXPositive = dx >= 0;
-        bool isPathYPositive = dy >= 0;
+        // Apply direction-specific width factor 
+        float directionWidthFactor = 1.5f;
         
-        Console.WriteLine($"Path direction: dx={dx}, dy={dy}, " +
-                         $"xPositive={isPathXPositive}, yPositive={isPathYPositive}");
+        // Width adjustments by cardinal direction
+        if (direction == "WEST" || direction == "EAST") {
+            directionWidthFactor = 1.8f;  // Horizontal paths need more width
+        }
+        else if (direction == "NORTH" || direction == "SOUTH") {
+            directionWidthFactor = 2.0f;  // Vertical paths need even more width
+        }
         
+        // Give extra width to all reversed paths
+        if (shouldReverseCalculation)
+            directionWidthFactor *= 1.2f;
+                
+        adjustedWidth *= directionWidthFactor;
+        
+        // Track the last calculated width multiplier for debugging
+        float lastWidthMultiplier = directionWidthFactor;
+        
+        // Special handling for diagonal vectors: increase the width to avoid thin paths
+        bool isDiagonal = (Math.Abs(dx) > 1.0f && Math.Abs(dy) > 1.0f && 
+                          Math.Abs(Math.Abs(dx) - Math.Abs(dy)) < Math.Min(Math.Abs(dx), Math.Abs(dy)) * 0.5f);
+        if (isDiagonal) {
+            adjustedWidth *= 1.2f;
+        }
+
         // Process all tiles in bounding box
         for (int x = minX; x <= maxX; x++)
         {
@@ -348,69 +404,110 @@ public class GradientTool : BaseTool
                 LandObject? lo = MapManager.LandTiles[x, y];
                 if (lo == null)
                     continue;
-                
-                // Calculate perpendicular distance to the line
-                float perpDistance = Math.Abs(a * x + b * y + c) / lineLengthFactor;
-                
-                // Skip if too far from path
-                if (perpDistance > _pathWidth)
-                    continue;
-                
-                // Calculate position along path more robustly
-                float t;
-                
-                // Vector from start to the current point
+
+                // Vector from START to current point
                 float ptX = x - startX;
                 float ptY = y - startY;
                 
-                // Project this vector onto the path vector
-                float dotProduct = ptX * dx + ptY * dy;
-                float projection = dotProduct / (dx * dx + dy * dy);
+                // Project point onto path to find position along path (dot product)
+                float dotProduct = ptX * ndx + ptY * ndy;
                 
-                // This is the parametric position along the path (0-1)
-                t = projection;
-                
-                // Skip if outside path segment
-                if (t < 0.0f || t > 1.0f)
+                // Skip if outside path segment with a small tolerance
+                float t = dotProduct / pathLength;
+                if (t < -0.05f || t > 1.05f)
                     continue;
                 
-                // Calculate target height based on gradient
-                float gradientFactor = GetGradientFactor(t);
+                // Calculate perpendicular distance vector from path
+                float perpX = ptX - dotProduct * ndx;
+                float perpY = ptY - dotProduct * ndy;
+
+                // Quadrant-specific perpendicular vector scaling with safe defaults
+                bool perpInNegativeX = perpX < 0;
+                bool perpInNegativeY = perpY < 0;
+                
+                float perpXScale = 1.0f;
+                float perpYScale = 1.0f;
+                
+                // Base scaling adjustments by direction
+                if (direction == "WEST" || direction == "EAST") 
+                {
+                    // For horizontal paths, we need to stretch perpendicular Y
+                    perpXScale = 1.2f;
+                    perpYScale = 1.4f;
+                    
+                    // For west/east, emphasize the side where the path widens
+                    if (direction == "WEST") {
+                        if (perpInNegativeY) perpYScale = 1.6f; // North side wider for WEST
+                    } else { // EAST
+                        if (!perpInNegativeY) perpYScale = 1.6f; // South side wider for EAST
+                    }
+                }
+                else if (direction == "NORTH" || direction == "SOUTH") 
+                {
+                    // For vertical paths, we need to stretch perpendicular X
+                    perpXScale = 1.4f;
+                    perpYScale = 1.2f;
+                    
+                    // For north/south, emphasize the side where the path widens
+                    if (direction == "NORTH") {
+                        if (perpInNegativeX) perpXScale = 1.6f; // West side wider for NORTH
+                    } else { // SOUTH
+                        if (!perpInNegativeX) perpXScale = 1.6f; // East side wider for SOUTH
+                    }
+                }
+                else if (isDiagonal) 
+                {
+                    // For diagonal paths, make a more uniform scaling
+                    perpXScale = 1.3f;
+                    perpYScale = 1.3f;
+                }
+
+                // When reversed, be even more aggressive with scaling
+                if (shouldReverseCalculation) {
+                    perpXScale *= 1.2f;
+                    perpYScale *= 1.2f;
+                }
+                
+                // Apply the scaled perpendicular components
+                perpX *= perpXScale;
+                perpY *= perpYScale;
+                
+                // Now apply the standard isometric transformation
+                float isoX = perpX * rsqrt2 - perpY * -rsqrt2;
+                float isoY = perpX * -rsqrt2 + perpY * rsqrt2;
+                
+                // Calculate final distance in isometric space
+                float isoDistance = (float)Math.Sqrt(isoX * isoX + isoY * isoY);
+                
+                // Skip if too far from path
+                if (isoDistance > adjustedWidth)
+                    continue;
+                
+                // Track the last width for debugging
+                lastWidthMultiplier = adjustedWidth / _pathWidth;
+
+                // Clamp t to 0-1 range for height calculation
+                t = Math.Clamp(t, 0, 1);
+                
+                // Calculate target height - linear gradient from start to end Z
                 sbyte currentZ = lo.Tile.Z;
-                int targetHeight = (int)(startZ + (endZ - startZ) * gradientFactor);
-                
-                // Apply edge fade if enabled
-                if (_useEdgeFade && perpDistance > (_pathWidth - _edgeFadeWidth))
-                {
-                    float fadeDistance = perpDistance - (_pathWidth - _edgeFadeWidth);
-                    float fadeFactor = 1.0f - (fadeDistance / _edgeFadeWidth);
-                    fadeFactor = Math.Max(0, Math.Min(1, fadeFactor));
-                    targetHeight = (int)(currentZ * (1 - fadeFactor) + targetHeight * fadeFactor);
-                }
-                
-                // Respect existing terrain if enabled
-                if (_respectExistingTerrain)
-                {
-                    targetHeight = (int)(currentZ * (1 - _blendFactor) + targetHeight * _blendFactor);
-                }
+                int targetHeight = (int)(startZ + (endZ - startZ) * t);
                 
                 // Only create ghost if height changed
                 if (targetHeight != currentZ)
                 {
+                    // Create the ghost tile
                     sbyte newZ = (sbyte)Math.Clamp(targetHeight, -128, 127);
                     var newTile = new LandTile(lo.LandTile.Id, lo.Tile.X, lo.Tile.Y, newZ);
                     var ghostTile = new LandObject(newTile);
                     
-                    // Count quadrants for reporting purposes only
-                    int normX = x - startX;
-                    int normY = y - startY;
-                    
-                    if (normX >= 0) {
-                        if (normY >= 0) seCount++;
-                        else neCount++;
+                    // Count quadrants for reporting
+                    if (x < startX) {
+                        if (y < startY) nwCount++;
+                        else swCount++;
                     } else {
-                        if (normY >= 0) swCount++;
-                        else nwCount++;
+                        if (y < startY) neCount++;
+                        else seCount++;
                     }
                     
                     pendingGhostTiles[(x, y)] = ghostTile;
@@ -420,15 +517,36 @@ public class GradientTool : BaseTool
             }
         }
         
-        // Print counts for each quadrant for debugging
-        Console.WriteLine($"Modified tiles by quadrant - NW: {nwCount}, NE: {neCount}, SW: {swCount}, SE: {seCount}");
-        
-        // Update all tiles to ensure proper rendering
+        // Report summary information
+        if (_showDebugInfo)
+        {
+            // Only show quadrant details at levels 2+
+            if (_debugLevel >= 2)
+            {
+                Console.WriteLine($"[GRAD] Tiles: NW:{nwCount} NE:{neCount} SW:{swCount} SE:{seCount} Tot:{pendingGhostTiles.Count}");
+
+                // Alert if any quadrant has zero tiles when it should have some
+                bool hasAllDirections = Math.Abs(dx) > 1 && Math.Abs(dy) > 1;
+                bool shouldHaveAllQuadrants = hasAllDirections && Math.Abs(dx) > 3 && Math.Abs(dy) > 3;
+                if (shouldHaveAllQuadrants && (nwCount == 0 || neCount == 0 || swCount == 0 || seCount == 0))
+                    Console.WriteLine($"[WARN] Missing quadrant! Dir:({ndx:F1},{ndy:F1}) Scale:{lastWidthMultiplier:F1}");
+                
+                // Report width factors used
+                Console.WriteLine($"[GRAD] Width factors: base:{_pathWidth} adjusted:{adjustedWidth:F1} multiplier:{lastWidthMultiplier:F1}");
+            }
+            else
+            {
+                // Simple count for level 1
+                Console.WriteLine($"[GRAD] Modified {pendingGhostTiles.Count} tiles");
+            }
+        }
+
+        // Update all tiles for rendering
         foreach (var kvp in pendingGhostTiles)
         {
             LandObject ghostTile = kvp.Value;
-            
-            // Mark the tile and its neighbors for recalculation
+
+            // Mark neighbors for recalculation
             for (int nx = ghostTile.Tile.X - 3; nx <= ghostTile.Tile.X + 3; nx++)
             {
                 for (int ny = ghostTile.Tile.Y - 3; ny <= ghostTile.Tile.Y + 3; ny++)
@@ -441,68 +559,43 @@ public class GradientTool : BaseTool
                     }
                 }
             }
-            
-            // This triggers proper recalculation of the tile
+
             MapManager.OnLandTileElevated(ghostTile.LandTile, ghostTile.LandTile.Z);
         }
-        
-        // Log the total count of modified tiles
-        Console.WriteLine($"Total modified: {pendingGhostTiles.Count} tiles");
-    }
-    
-    // Get gradient factor based on selected transition type
-    private float GetGradientFactor(float t)
-    {
-        return _transitionType switch
-        {
-            0 => t,                    // Linear
-            1 => SmoothStep(t),        // Smooth
-            2 => SCurve(t),            // S-Curve
-            _ => t
-        };
-    }
-    
-    // Smoothstep function for smooth transition
-    private float SmoothStep(float t)
-    {
-        return t * t * (3 - 2 * t);
-    }
-    
-    // S-Curve function for more pronounced easing
-    private float SCurve(float t)
-    {
-        return t * t * t * (t * (t * 6 - 15) + 10);
     }
 
     protected override void InternalApply(TileObject? o)
     {
-        // Don't check for chance here, as we want to apply all ghost tiles
         if (_startTile == null || _endTile == null)
             return;
-    
-        Console.WriteLine($"Applying changes from {MapManager.GhostLandTiles.Count} ghost tiles");
-            
-        // Apply the changes from ghost tiles to actual tiles
+
+        // Make sure we don't report applying 0 changes
+        if (MapManager.GhostLandTiles.Count == 0)
+        {
+            // Re-generate path before applying if no ghosts exist
+            PreviewPath();
+        }
+
+        if (_showDebugInfo)
+            Console.WriteLine($"[GRAD] Applying {MapManager.GhostLandTiles.Count} changes");
+
         foreach (var pair in new Dictionary<LandObject, LandObject>(MapManager.GhostLandTiles))
         {
             pair.Key.LandTile.ReplaceLand(pair.Key.LandTile.Id, pair.Value.Tile.Z);
         }
-    
-        // Clean up
+
         ClearGhosts();
         _startTile = null;
         _endTile = null;
-        _pathGenerated = false;
     }
-    
+
     private void ClearGhosts()
     {
-        // Clear any existing ghost tiles
         foreach (var pair in new Dictionary<LandObject, LandObject>(MapManager.GhostLandTiles))
         {
             pair.Key.Visible = true;
         }
-        
+
         MapManager.GhostLandTiles.Clear();
         MapManager.GhostStaticTiles.Clear();
     }
