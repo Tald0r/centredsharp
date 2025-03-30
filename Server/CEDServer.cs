@@ -281,22 +281,108 @@ public class CEDServer : ILogging, IDisposable
         var logMsg = "Automatic backup in progress";
         LogInfo(logMsg);
         Send(new ServerStatePacket(ServerState.Other, logMsg));
-        String backupDir;
-        for (var i = Config.AutoBackup.MaxBackups; i > 0; i--)
+        
+        try
         {
-            backupDir = $"{Config.AutoBackup.Directory}/Backup{i}";
-            if (Directory.Exists(backupDir))
-                if (i == Config.AutoBackup.MaxBackups)
-                    Directory.Delete(backupDir, true);
+            // Make sure the backup directory exists
+            if (!Directory.Exists(Config.AutoBackup.Directory))
+            {
+                Directory.CreateDirectory(Config.AutoBackup.Directory);
+            }
+
+            // Lock files for directory operations to prevent race conditions
+            string lockFilePath = Path.Combine(Config.AutoBackup.Directory, "backup.lock");
+            bool lockFileCreated = false;
+
+            try
+            {
+                // Try to create a lock file to coordinate between multiple server instances
+                try
+                {
+                    using (FileStream fs = new FileStream(lockFilePath, FileMode.CreateNew))
+                    {
+                        // Successfully created the lock file
+                        lockFileCreated = true;
+                    }
+                }
+                catch (IOException)
+                {
+                    // Another process is already doing backups, use timestamp instead
+                    LogWarn("Another server instance is currently performing backups. Using timestamp-based backup name.");
+                }
+
+                if (lockFileCreated)
+                {
+                    // Normal rotation - we have exclusive access
+                    // Rotate existing backup folders
+                    for (var i = Config.AutoBackup.MaxBackups; i > 0; i--)
+                    {
+                        var currentBackupDir = $"{Config.AutoBackup.Directory}/Backup{i}";
+                        
+                        if (Directory.Exists(currentBackupDir))
+                        {
+                            try
+                            {
+                                if (i == Config.AutoBackup.MaxBackups)
+                                {
+                                    Directory.Delete(currentBackupDir, true);
+                                    LogInfo($"Deleted oldest backup: {currentBackupDir}");
+                                }
+                                else
+                                {
+                                    var nextBackupDir = $"{Config.AutoBackup.Directory}/Backup{i + 1}";
+                                    Directory.Move(currentBackupDir, nextBackupDir);
+                                    LogInfo($"Moved {currentBackupDir} to {nextBackupDir}");
+                                }
+                            }
+                            catch (IOException ex)
+                            {
+                                LogWarn($"Couldn't access backup directory {currentBackupDir}: {ex.Message}");
+                            }
+                            catch (UnauthorizedAccessException ex)
+                            {
+                                LogWarn($"Access denied for backup directory {currentBackupDir}: {ex.Message}");
+                            }
+                        }
+                    }
+                    
+                    // Create primary backup directory
+                    var backupDir = $"{Config.AutoBackup.Directory}/Backup1";
+                    Landscape.Backup(backupDir);
+                    LogInfo($"Backup completed to {backupDir}");
+                }
                 else
-                    Directory.Move(backupDir, $"{Config.AutoBackup.Directory}/Backup{i + 1}");
+                {
+                    // Use timestamp-based naming to avoid conflicts
+                    var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                    var backupDir = $"{Config.AutoBackup.Directory}/Backup_{timestamp}";
+                    Landscape.Backup(backupDir);
+                    LogInfo($"Backup completed to {backupDir} (timestamp-based name due to concurrent backups)");
+                }
+            }
+            finally
+            {
+                // Clean up lock file if we created it
+                if (lockFileCreated && File.Exists(lockFilePath))
+                {
+                    try
+                    {
+                        File.Delete(lockFilePath);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogWarn($"Failed to remove backup lock file: {ex.Message}");
+                    }
+                }
+            }
+
+            Send(new ServerStatePacket(ServerState.Running));
         }
-        backupDir = $"{Config.AutoBackup.Directory}/Backup1";
-
-        Landscape.Backup(backupDir);
-
-        Send(new ServerStatePacket(ServerState.Running));
-        LogInfo("Automatic backup finished.");
+        catch (Exception ex)
+        {
+            LogError($"Unexpected error during backup process: {ex.Message}");
+            Send(new ServerStatePacket(ServerState.Running));
+        }
     }
 
     public void PushCommand(string command)
