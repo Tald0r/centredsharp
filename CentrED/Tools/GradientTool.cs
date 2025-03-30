@@ -295,15 +295,8 @@ public class GradientTool : BaseTool
     // Generate path tiles using a better, universal algorithm
     private void GeneratePathTiles(int startX, int startY, int endX, int endY, sbyte startZ, sbyte endZ)
     {
-        // Start area operation tracking in BaseTool - this sets AreaStartX, AreaStartY
-        OnAreaOperationStart((ushort)startX, (ushort)startY);
-        OnAreaOperationUpdate((ushort)endX, (ushort)endY);
-
-        // Use BaseTool's stored coordinates for consistency
-        startX = AreaStartX;
-        startY = AreaStartY;
-        endX = AreaEndX;
-        endY = AreaEndY;
+        // DO NOT start area operation tracking again - we already did this in GhostApply
+        // Use the coordinates directly - they've already been updated through OnAreaOperation calls
 
         // Create a bounding box with padding for the gradient area
         int padding = _pathWidth + 2;
@@ -313,12 +306,15 @@ public class GradientTool : BaseTool
         int maxY = Math.Max(startY, endY) + padding;
         
         Console.WriteLine($"Scanning area: ({minX},{minY}) to ({maxX},{maxY})");
-        Console.WriteLine($"Path width: {_pathWidth}");
+        Console.WriteLine($"Path: ({startX},{startY}) to ({endX},{endY})");
         
-        // Calculate path vector using BaseTool's coordinates
+        // Calculate path vector
         float dx = endX - startX;
         float dy = endY - startY;
-        float pathLengthSquared = dx * dx + dy * dy;
+        float pathLength = (float)Math.Sqrt(dx * dx + dy * dy);
+        
+        if (pathLength < 0.001f)
+            return;
         
         // Dictionary to track modified tiles
         Dictionary<(int, int), LandObject> pendingGhostTiles = new();
@@ -326,11 +322,18 @@ public class GradientTool : BaseTool
         // Track tiles modified in each quadrant for debugging
         int nwCount = 0, neCount = 0, swCount = 0, seCount = 0;
         
-        // Create line equation ax + by + c = 0 for distance calculation
-        float a = endY - startY;
-        float b = startX - endX;
+        // Create line equation ax + by + c = 0 for perpendicular distance
+        float a = dy;  // endY - startY
+        float b = -dx; // startX - endX
         float c = endX * startY - startX * endY;
-        float lineLengthFactor = (float)Math.Sqrt(a * a + b * b);
+        float lineLengthFactor = pathLength; // Already calculated above
+        
+        // Track the direction of the path - important for quadrant handling
+        bool isPathXPositive = dx >= 0;
+        bool isPathYPositive = dy >= 0;
+        
+        Console.WriteLine($"Path direction: dx={dx}, dy={dy}, " +
+                         $"xPositive={isPathXPositive}, yPositive={isPathYPositive}");
         
         // Process all tiles in bounding box
         for (int x = minX; x <= maxX; x++)
@@ -346,33 +349,28 @@ public class GradientTool : BaseTool
                 if (lo == null)
                     continue;
                 
-                // Calculate perpendicular distance using line equation
+                // Calculate perpendicular distance to the line
                 float perpDistance = Math.Abs(a * x + b * y + c) / lineLengthFactor;
                 
                 // Skip if too far from path
                 if (perpDistance > _pathWidth)
                     continue;
                 
-                // Calculate position along the path (parameter t)
+                // Calculate position along path more robustly
                 float t;
                 
-                // Important: Always calculate relative to start point consistently
-                int normX = x - startX;
-                int normY = y - startY;
+                // Vector from start to the current point
+                float ptX = x - startX;
+                float ptY = y - startY;
                 
-                // Choose the most stable calculation method based on path direction
-                if (Math.Abs(dx) > Math.Abs(dy))
-                {
-                    // More horizontal path - avoid division by zero
-                    t = dx != 0 ? normX / dx : 0;
-                }
-                else
-                {
-                    // More vertical path - avoid division by zero
-                    t = dy != 0 ? normY / dy : 0;
-                }
+                // Project this vector onto the path vector
+                float dotProduct = ptX * dx + ptY * dy;
+                float projection = dotProduct / (dx * dx + dy * dy);
                 
-                // Skip if outside path segment (not between start and end)
+                // This is the parametric position along the path (0-1)
+                t = projection;
+                
+                // Skip if outside path segment
                 if (t < 0.0f || t > 1.0f)
                     continue;
                 
@@ -403,17 +401,15 @@ public class GradientTool : BaseTool
                     var newTile = new LandTile(lo.LandTile.Id, lo.Tile.X, lo.Tile.Y, newZ);
                     var ghostTile = new LandObject(newTile);
                     
-                    // Use normalized coordinates for quadrant detection - always relative to start!
-                    // This matches how BaseTool's GetSequentialTileId works
-                    bool isXPositive = normX >= 0;
-                    bool isYPositive = normY >= 0;
+                    // Count quadrants for reporting purposes only
+                    int normX = x - startX;
+                    int normY = y - startY;
                     
-                    // Count quadrants for reporting purposes
-                    if (isXPositive) {
-                        if (isYPositive) seCount++;
+                    if (normX >= 0) {
+                        if (normY >= 0) seCount++;
                         else neCount++;
                     } else {
-                        if (isYPositive) swCount++;
+                        if (normY >= 0) swCount++;
                         else nwCount++;
                     }
                     
@@ -423,9 +419,6 @@ public class GradientTool : BaseTool
                 }
             }
         }
-        
-        // End area operation tracking
-        OnAreaOperationEnd();
         
         // Print counts for each quadrant for debugging
         Console.WriteLine($"Modified tiles by quadrant - NW: {nwCount}, NE: {neCount}, SW: {swCount}, SE: {seCount}");
