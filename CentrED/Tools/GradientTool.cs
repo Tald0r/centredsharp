@@ -24,6 +24,7 @@ public class GradientTool : BaseTool
     // Path settings - SIMPLIFIED
     private int _pathWidth = 5;                // Width of path in tiles
     private bool _showAdvancedOptions = false; // Toggle for showing advanced options
+    private bool _disableAutoReverse = false;  // Option to disable auto-reversal
 
     // Internal calculation fields
     private Vector2 _pathDirection;
@@ -72,6 +73,11 @@ public class GradientTool : BaseTool
                 ImGui.SetNextItemWidth(150);
                 ImGui.SliderInt("Detail Level", ref _debugLevel, 1, 3);
             }
+            
+            // Add option to disable auto-reversal
+            ImGui.Checkbox("Disable Auto-Reverse", ref _disableAutoReverse);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("When checked, paths will be created exactly as drawn");
         }
         else
         {
@@ -274,273 +280,179 @@ public class GradientTool : BaseTool
         GeneratePathTiles(startX, startY, endX, endY, startZ, endZ);
     }
 
-    // Generate path tiles properly based on the first click (start point)
     private void GeneratePathTiles(int startX, int startY, int endX, int endY, sbyte startZ, sbyte endZ)
     {
-        // Create a bounding box with padding for the gradient area
-        int padding = _pathWidth + 2;
+        // Create a simplified bounding box
+        int padding = _pathWidth * 2; // Extra padding to be safe
         int minX = Math.Min(startX, endX) - padding;
         int maxX = Math.Max(startX, endX) + padding;
         int minY = Math.Min(startY, endY) - padding;
         int maxY = Math.Max(startY, endY) + padding;
         
-        // Only show scan area at debug level 3+
-        if (_showDebugInfo && _debugLevel >= 3)
-            Console.WriteLine($"[GRAD] Scan: ({minX},{minY})→({maxX},{maxY})");
-
-        // Calculate path vector - ALWAYS FROM START TO END
+        // Calculate path vector and properties
         float dx = endX - startX; 
         float dy = endY - startY; 
         float pathLength = (float)Math.Sqrt(dx * dx + dy * dy);
 
         if (pathLength < 0.001f)
             return;
-
-        // Save original non-normalized direction for debugging
-        float originalDx = dx;
-        float originalDy = dy;
-
-        // Calculate path angle in world space coordinates
-        float angle = (float)Math.Atan2(dy, dx);
-        
-        // Check if we're going in problematic directions (essentially negative X or Y)
-        bool isNorthish = dy < 0;
-        bool isWestish = dx < 0;
-        
-        // Get absolute angle from 0-90 degrees to determine cardinal direction
-        float absAngle = Math.Abs(angle);
-        bool isMoreHorizontal = absAngle < 0.78f || absAngle > 2.35f; // E-W dominant
-        bool isMoreVertical = absAngle >= 0.78f && absAngle <= 2.35f;  // N-S dominant
-
-        // Auto-reverse logic:
-        // 1. Always reverse for NORTH-dominant (negative Y with more vertical angle)
-        // 2. Always reverse for WEST-dominant (negative X with more horizontal angle)
-        bool shouldReverseCalculation = (isNorthish && isMoreVertical) || (isWestish && isMoreHorizontal);
-        
-        // If automatic detection suggests to reverse the path calculation
-        if (shouldReverseCalculation)
-        {
-            // Swap the direction vector but keep the same endpoints
-            dx = -dx;
-            dy = -dy;
             
-            // Also swap the heights to maintain correct gradient
-            (startZ, endZ) = (endZ, startZ);
-            
-            // Recalculate angle with reversed direction
-            angle = (float)Math.Atan2(dy, dx);
-            
-            if (_showDebugInfo && _debugLevel >= 2)
-                Console.WriteLine($"[GRAD] Auto-reversed direction for better results");
-        }
-
-        // Create normalized direction vector for the path
+        // Calculate normalized direction vector
         float ndx = dx / pathLength;
         float ndy = dy / pathLength;
         
-        // Direction info for debugging
-        string direction = "";
-        if (angle < -2.35f || angle > 2.35f) direction = "WEST";
-        else if (angle < -0.78f) direction = "NORTH";
-        else if (angle < 0.78f) direction = "EAST";
-        else if (angle < 2.35f) direction = "SOUTH";
+        // Calculate perpendicular direction (rotate by 90 degrees)
+        float perpX = -ndy;
+        float perpY = ndx;
         
+        // For debugging, check angle to ensure perpendicular is correct
         if (_showDebugInfo && _debugLevel >= 2)
-            Console.WriteLine($"[GRAD] Direction: {direction} (angle: {angle:F2}) Auto-reversed: {shouldReverseCalculation}");
-            
-        // Extra debugging to understand directional pattern
-        if (_showDebugInfo && _debugLevel >= 3)
-            Console.WriteLine($"[GRAD] Original vector: ({originalDx:F1},{originalDy:F1}) → Adjusted: ({dx:F1},{dy:F1})");
-
+        {
+            float dotProduct = ndx * perpX + ndy * perpY;
+            Console.WriteLine($"[GRAD] Direction check: Path=({ndx:F2},{ndy:F2}), Perp=({perpX:F2},{perpY:F2}), Dot={dotProduct:F4}");
+        }
+        
         // Dictionary to track modified tiles
         Dictionary<(int, int), LandObject> pendingGhostTiles = new();
-
+        // Track ACTUAL positions of ALL tiles to verify width
+        List<(int x, int y)> allPositions = new();
+        
         // Track tiles modified in each quadrant for debugging
         int nwCount = 0, neCount = 0, swCount = 0, seCount = 0;
-
-        // Use the same constant for isometric calculations as elsewhere in the codebase
-        float rsqrt2 = TileObject.RSQRT2;
         
-        // Base path width adjustments
-        float adjustedWidth = _pathWidth;
+        // Special case for exact cardinal directions (more reliable placement)
+        bool isCardinalDirection = Math.Abs(Math.Abs(ndx) - 1.0f) < 0.01f || Math.Abs(Math.Abs(ndy) - 1.0f) < 0.01f;
         
-        // Apply direction-specific width factor 
-        float directionWidthFactor = 1.5f;
+        // Hard reset - DIRECT PATH CALCULATION WITH GUARANTEED WIDTH
+        // Calculate the EXACT path based on Bresenham's line algorithm
+        List<(int x, int y)> pathTiles = new List<(int x, int y)>();
         
-        // Width adjustments by cardinal direction
-        if (direction == "WEST" || direction == "EAST") {
-            directionWidthFactor = 1.8f;  // Horizontal paths need more width
-        }
-        else if (direction == "NORTH" || direction == "SOUTH") {
-            directionWidthFactor = 2.0f;  // Vertical paths need even more width
-        }
+        // First, generate the centerline path
+        int x = startX;
+        int y = startY;
+        int dx2 = Math.Abs((int)dx);
+        int dy2 = Math.Abs((int)dy);
+        int sx = dx > 0 ? 1 : -1;
+        int sy = dy > 0 ? 1 : -1;
+        int err = dx2 - dy2;
         
-        // Give extra width to all reversed paths
-        if (shouldReverseCalculation)
-            directionWidthFactor *= 1.2f;
-                
-        adjustedWidth *= directionWidthFactor;
+        // Add starting point
+        pathTiles.Add((x, y));
         
-        // Track the last calculated width multiplier for debugging
-        float lastWidthMultiplier = directionWidthFactor;
-        
-        // Special handling for diagonal vectors: increase the width to avoid thin paths
-        bool isDiagonal = (Math.Abs(dx) > 1.0f && Math.Abs(dy) > 1.0f && 
-                          Math.Abs(Math.Abs(dx) - Math.Abs(dy)) < Math.Min(Math.Abs(dx), Math.Abs(dy)) * 0.5f);
-        if (isDiagonal) {
-            adjustedWidth *= 1.2f;
-        }
-
-        // Process all tiles in bounding box
-        for (int x = minX; x <= maxX; x++)
+        // Generate all points along the line
+        while (x != endX || y != endY)
         {
-            for (int y = minY; y <= maxY; y++)
+            int e2 = err * 2;
+            if (e2 > -dy2)
             {
-                // Skip if out of bounds
-                if (!Client.IsValidX((ushort)x) || !Client.IsValidY((ushort)y))
-                    continue;
+                err -= dy2;
+                x += sx;
+            }
+            if (e2 < dx2)
+            {
+                err += dx2;
+                y += sy;
+            }
+            pathTiles.Add((x, y));
+        }
+        
+        // For very short paths, log the exact tile list for debugging
+        if (_showDebugInfo && _debugLevel >= 2 && pathTiles.Count < 10)
+        {
+            string pathStr = string.Join(", ", pathTiles.Select(p => $"({p.x},{p.y})"));
+            Console.WriteLine($"[GRAD] Path points: {pathStr}");
+        }
+        
+        // ABSOLUTE GUARANTEE OF WIDTH:
+        // For each path tile, we'll add EXACTLY _pathWidth tiles in a perpendicular line
+        foreach (var pathPoint in pathTiles)
+        {
+            // Calculate position along path for height (t value)
+            int idx = pathTiles.IndexOf(pathPoint);
+            float t = idx / (float)(pathTiles.Count - 1);
+            int targetHeight = (int)(startZ + (endZ - startZ) * t);
+            
+            // For each path point, calculate a perpendicular line of EXACTLY _pathWidth tiles
+            List<(int x, int y)> tilePositions = GetExactPerpendicularTiles(pathPoint.x, pathPoint.y, perpX, perpY, _pathWidth);
+            
+            // Map edge positions to their distance from center for edge blending
+            Dictionary<(int x, int y), float> edgeDistances = new Dictionary<(int x, int y), float>();
+            
+            // Find center position and calculate edge distances
+            var centerPos = tilePositions[tilePositions.Count / 2]; // Center or just right of center for even widths
+            int centerIndex = tilePositions.Count / 2;
+            
+            // Calculate distance of each tile from the center for edge blending
+            for (int i = 0; i < tilePositions.Count; i++)
+            {
+                var pos = tilePositions[i];
+                // Edge factor is 0.0 at center, 1.0 at edges
+                float edgeFactor = Math.Abs(i - centerIndex) / (float)Math.Max(1, centerIndex);
+                edgeDistances[pos] = edgeFactor;
+            }
+            
+            // Log the width at each point if highly detailed debug
+            if (_showDebugInfo && _debugLevel >= 3)
+                Console.WriteLine($"[GRAD] At ({pathPoint.x},{pathPoint.y}), width={tilePositions.Count}");
+            
+            foreach (var tilePos in tilePositions)
+            {
+                allPositions.Add(tilePos); // Track ALL positions for verification
                 
-                // Get the land object
-                LandObject? lo = MapManager.LandTiles[x, y];
-                if (lo == null)
-                    continue;
-
-                // Vector from START to current point
-                float ptX = x - startX;
-                float ptY = y - startY;
+                // Apply special height handling based on edge distance
+                int adjustedHeight = targetHeight;
                 
-                // Project point onto path to find position along path (dot product)
-                float dotProduct = ptX * ndx + ptY * ndy;
-                
-                // Skip if outside path segment with a small tolerance
-                float t = dotProduct / pathLength;
-                if (t < -0.05f || t > 1.05f)
-                    continue;
-                
-                // Calculate perpendicular distance vector from path
-                float perpX = ptX - dotProduct * ndx;
-                float perpY = ptY - dotProduct * ndy;
-
-                // Quadrant-specific perpendicular vector scaling with safe defaults
-                bool perpInNegativeX = perpX < 0;
-                bool perpInNegativeY = perpY < 0;
-                
-                float perpXScale = 1.0f;
-                float perpYScale = 1.0f;
-                
-                // Base scaling adjustments by direction
-                if (direction == "WEST" || direction == "EAST") 
+                // Only apply edge blending if this is an edge tile
+                if (edgeDistances.TryGetValue(tilePos, out float edgeFactor) && edgeFactor > 0.6f)
                 {
-                    // For horizontal paths, we need to stretch perpendicular Y
-                    perpXScale = 1.2f;
-                    perpYScale = 1.4f;
-                    
-                    // For west/east, emphasize the side where the path widens
-                    if (direction == "WEST") {
-                        if (perpInNegativeY) perpYScale = 1.6f; // North side wider for WEST
-                    } else { // EAST
-                        if (!perpInNegativeY) perpYScale = 1.6f; // South side wider for EAST
+                    // Get the terrain height at this position
+                    LandObject? lo = MapManager.LandTiles[tilePos.x, tilePos.y];
+                    if (lo != null)
+                    {
+                        sbyte terrainHeight = lo.Tile.Z;
+                        
+                        // Blend between target height and terrain height based on edge factor
+                        // This creates a smoother transition at the edges
+                        adjustedHeight = (int)Math.Round(targetHeight * (1 - edgeFactor * 0.7f) + 
+                                                      terrainHeight * (edgeFactor * 0.7f));
+                        
+                        // Debug output for edge blending
+                        if (_showDebugInfo && _debugLevel >= 3)
+                            Console.WriteLine($"[GRAD-EDGE] Tile ({tilePos.x},{tilePos.y}) Edge:{edgeFactor:F2} " +
+                                           $"Terrain:{terrainHeight} Target:{targetHeight} Adjusted:{adjustedHeight}");
                     }
                 }
-                else if (direction == "NORTH" || direction == "SOUTH") 
-                {
-                    // For vertical paths, we need to stretch perpendicular X
-                    perpXScale = 1.4f;
-                    perpYScale = 1.2f;
-                    
-                    // For north/south, emphasize the side where the path widens
-                    if (direction == "NORTH") {
-                        if (perpInNegativeX) perpXScale = 1.6f; // West side wider for NORTH
-                    } else { // SOUTH
-                        if (!perpInNegativeX) perpXScale = 1.6f; // East side wider for SOUTH
-                    }
-                }
-                else if (isDiagonal) 
-                {
-                    // For diagonal paths, make a more uniform scaling
-                    perpXScale = 1.3f;
-                    perpYScale = 1.3f;
-                }
-
-                // When reversed, be even more aggressive with scaling
-                if (shouldReverseCalculation) {
-                    perpXScale *= 1.2f;
-                    perpYScale *= 1.2f;
-                }
                 
-                // Apply the scaled perpendicular components
-                perpX *= perpXScale;
-                perpY *= perpYScale;
-                
-                // Now apply the standard isometric transformation
-                float isoX = perpX * rsqrt2 - perpY * -rsqrt2;
-                float isoY = perpX * -rsqrt2 + perpY * rsqrt2;
-                
-                // Calculate final distance in isometric space
-                float isoDistance = (float)Math.Sqrt(isoX * isoX + isoY * isoY);
-                
-                // Skip if too far from path
-                if (isoDistance > adjustedWidth)
-                    continue;
-                
-                // Track the last width for debugging
-                lastWidthMultiplier = adjustedWidth / _pathWidth;
-
-                // Clamp t to 0-1 range for height calculation
-                t = Math.Clamp(t, 0, 1);
-                
-                // Calculate target height - linear gradient from start to end Z
-                sbyte currentZ = lo.Tile.Z;
-                int targetHeight = (int)(startZ + (endZ - startZ) * t);
-                
-                // Only create ghost if height changed
-                if (targetHeight != currentZ)
-                {
-                    // Create the ghost tile
-                    sbyte newZ = (sbyte)Math.Clamp(targetHeight, -128, 127);
-                    var newTile = new LandTile(lo.LandTile.Id, lo.Tile.X, lo.Tile.Y, newZ);
-                    var ghostTile = new LandObject(newTile);
-                    
-                    // Count quadrants for reporting
-                    if (x < startX) {
-                        if (y < startY) nwCount++;
-                        else swCount++;
-                    } else {
-                        if (y < startY) neCount++;
-                        else seCount++;
-                    }
-                    
-                    pendingGhostTiles[(x, y)] = ghostTile;
-                    MapManager.GhostLandTiles[lo] = ghostTile;
-                    lo.Visible = false;
-                }
+                AddGhostTileIfValid(tilePos.x, tilePos.y, adjustedHeight, startX, startY, pendingGhostTiles,
+                                   ref nwCount, ref neCount, ref swCount, ref seCount);
             }
         }
         
-        // Report summary information
+        // Count ACTUAL width at start and end
         if (_showDebugInfo)
         {
-            // Only show quadrant details at levels 2+
-            if (_debugLevel >= 2)
+            // Verify width at start and end points
+            if (pathTiles.Count > 0)
             {
-                Console.WriteLine($"[GRAD] Tiles: NW:{nwCount} NE:{neCount} SW:{swCount} SE:{seCount} Tot:{pendingGhostTiles.Count}");
-
-                // Alert if any quadrant has zero tiles when it should have some
-                bool hasAllDirections = Math.Abs(dx) > 1 && Math.Abs(dy) > 1;
-                bool shouldHaveAllQuadrants = hasAllDirections && Math.Abs(dx) > 3 && Math.Abs(dy) > 3;
-                if (shouldHaveAllQuadrants && (nwCount == 0 || neCount == 0 || swCount == 0 || seCount == 0))
-                    Console.WriteLine($"[WARN] Missing quadrant! Dir:({ndx:F1},{ndy:F1}) Scale:{lastWidthMultiplier:F1}");
+                var startPoint = pathTiles[0];
+                var endPoint = pathTiles[pathTiles.Count - 1];
                 
-                // Report width factors used
-                Console.WriteLine($"[GRAD] Width factors: base:{_pathWidth} adjusted:{adjustedWidth:F1} multiplier:{lastWidthMultiplier:F1}");
-            }
-            else
-            {
-                // Simple count for level 1
-                Console.WriteLine($"[GRAD] Modified {pendingGhostTiles.Count} tiles");
+                // Get all tiles at the same X coordinate for vertical paths
+                var startWidthCount = allPositions.Count(p => p.x == startPoint.x && Math.Abs(p.y - startPoint.y) <= _pathWidth);
+                var endWidthCount = allPositions.Count(p => p.x == endPoint.x && Math.Abs(p.y - endPoint.y) <= _pathWidth);
+                
+                // For horizontal paths, count tiles at the same Y coordinate
+                if (startWidthCount < _pathWidth)
+                {
+                    startWidthCount = allPositions.Count(p => p.y == startPoint.y && Math.Abs(p.x - startPoint.x) <= _pathWidth);
+                    endWidthCount = allPositions.Count(p => p.y == endPoint.y && Math.Abs(p.x - endPoint.x) <= _pathWidth);
+                }
+                
+                Console.WriteLine($"[GRAD] PATH WIDTH CHECK: Expected={_pathWidth}, Start={startWidthCount}, End={endWidthCount}, Total={pendingGhostTiles.Count}");
+                Console.WriteLine($"[GRAD] Tiles: NW:{nwCount} NE:{neCount} SW:{swCount} SE:{seCount}");
             }
         }
-
+        
         // Update all tiles for rendering
         foreach (var kvp in pendingGhostTiles)
         {
@@ -561,6 +473,134 @@ public class GradientTool : BaseTool
             }
 
             MapManager.OnLandTileElevated(ghostTile.LandTile, ghostTile.LandTile.Z);
+        }
+    }
+    
+    // Helper to get EXACT perpendicular tiles - GUARANTEED TO RETURN EXACTLY 'width' TILES
+    private List<(int x, int y)> GetExactPerpendicularTiles(int centerX, int centerY, float perpX, float perpY, int width)
+    {
+        List<(int x, int y)> result = new List<(int x, int y)>();
+        
+        // Always add the center tile
+        result.Add((centerX, centerY));
+        
+        // Special case with exact handling for cardinal directions
+        if (Math.Abs(perpX) > 0.95f || Math.Abs(perpY) > 0.95f)
+        {
+            // For pure horizontal or vertical perpendicular (simple case)
+            int dx = Math.Abs(perpX) > 0.7f ? (perpX > 0 ? 1 : -1) : 0;
+            int dy = Math.Abs(perpY) > 0.7f ? (perpY > 0 ? 1 : -1) : 0;
+            
+            // Add tiles on both sides of center
+            int halfWidth = width / 2;
+            
+            for (int i = 1; i <= halfWidth; i++)
+            {
+                // Add tile on one side
+                result.Add((centerX + dx * i, centerY + dy * i));
+                
+                // Add tile on the other side (if not exactly centered)
+                if (i <= width - 1 - halfWidth)
+                {
+                    result.Add((centerX - dx * i, centerY - dy * i));
+                }
+            }
+        }
+        else
+        {
+            // For diagonal paths, we need to handle fractional offsets
+            // Calculate how many tiles to add on each side
+            int halfWidth = width / 2;
+            
+            for (int i = 1; i <= halfWidth; i++)
+            {
+                // Round to nearest tile
+                int posX = (int)Math.Round(centerX + perpX * i);
+                int posY = (int)Math.Round(centerY + perpY * i);
+                
+                // Add it if not already in the list
+                if (!result.Contains((posX, posY)))
+                    result.Add((posX, posY));
+                    
+                // Same for negative side
+                int negX = (int)Math.Round(centerX - perpX * i);
+                int negY = (int)Math.Round(centerY - perpY * i);
+                
+                if (!result.Contains((negX, negY)) && (i <= width - 1 - halfWidth))
+                    result.Add((negX, negY));
+            }
+        }
+        
+        // Ensure we have EXACTLY 'width' tiles
+        while (result.Count < width)
+        {
+            // Add additional tiles as needed
+            int lastIdx = result.Count;
+            int dx = Math.Abs(perpX) > Math.Abs(perpY) ? (perpX > 0 ? 1 : -1) : 0;
+            int dy = Math.Abs(perpY) > Math.Abs(perpX) ? (perpY > 0 ? 1 : -1) : 0;
+            
+            // Find a nearby tile that's not already in the list
+            for (int i = 1; i <= 3; i++) // Try up to 3 tiles away
+            {
+                (int x, int y) newTile = (result[lastIdx - 1].x + dx * i, result[lastIdx - 1].y + dy * i);
+                if (!result.Contains(newTile))
+                {
+                    result.Add(newTile);
+                    break;
+                }
+            }
+        }
+        
+        // If we have too many tiles, remove from the end
+        while (result.Count > width)
+        {
+            result.RemoveAt(result.Count - 1);
+        }
+        
+        return result;
+    }
+
+    private void AddGhostTileIfValid(int x, int y, int targetHeight, int startX, int startY,
+                                   Dictionary<(int, int), LandObject> pendingGhostTiles,
+                                   ref int nwCount, ref int neCount, ref int swCount, ref int seCount)
+    {
+        // Skip if we've already processed this tile
+        if (pendingGhostTiles.ContainsKey((x, y)))
+            return;
+            
+        // Skip if out of bounds
+        if (!Client.IsValidX((ushort)x) || !Client.IsValidY((ushort)y))
+            return;
+        
+        // Get the land object
+        LandObject? lo = MapManager.LandTiles[x, y];
+        if (lo == null)
+            return;
+            
+        // Only create ghost if height changed
+        sbyte currentZ = lo.Tile.Z;
+        if (targetHeight != currentZ)
+        {
+            // Create the ghost tile
+            sbyte newZ = (sbyte)Math.Clamp(targetHeight, -128, 127);
+            var newTile = new LandTile(lo.LandTile.Id, lo.Tile.X, lo.Tile.Y, newZ);
+            var ghostTile = new LandObject(newTile);
+            
+            // Count quadrants for reporting
+            if (x < startX) {
+                if (y < startY) nwCount++;
+                else swCount++;
+            } else {
+                if (y < startY) neCount++;
+                else seCount++;
+            }
+            
+            pendingGhostTiles[(x, y)] = ghostTile;
+            MapManager.GhostLandTiles[lo] = ghostTile;
+            lo.Visible = false;
+            
+            if (_showDebugInfo && _debugLevel >= 3)
+                Console.WriteLine($"[GRAD-TILE] Added tile at ({x},{y}) with Z={newZ}");
         }
     }
 
