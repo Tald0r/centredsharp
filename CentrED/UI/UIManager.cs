@@ -46,6 +46,8 @@ public class UIManager
 
     internal MinimapWindow MinimapWindow;
     internal DebugWindow DebugWindow;
+    internal MultisWindow MultisWindow;
+
     public UIManager(GraphicsDevice gd)
     {
         _graphicsDevice = gd;
@@ -86,6 +88,9 @@ public class UIManager
         AddWindow(Category.Tools, new LSOWindow());
         AddWindow(Category.Tools, new ChatWindow());
         AddWindow(Category.Tools, new ServerAdminWindow());
+
+        MultisWindow = new MultisWindow(gd);
+        AddWindow(Category.Tools, MultisWindow);
 
         MinimapWindow = new MinimapWindow();
         AllWindows.Add(MinimapWindow);
