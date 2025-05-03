@@ -292,7 +292,8 @@ public class MapManager
                     TileDataLoader.Instance.Load(),
                     TexmapsLoader.Instance.Load(),
                     AnimDataLoader.Instance.Load(),
-                    LightsLoader.Instance.Load()
+                    LightsLoader.Instance.Load(),
+                    MultisManager.Instance.Load()
                 }
             ).Wait(TimeSpan.FromSeconds(10.0)))
             Log.Panic("Loading files timeout.");
@@ -303,6 +304,7 @@ public class MapManager
         Texmaps = new Texmap(_gfxDevice);
         HuesManager.Load(_gfxDevice);
         LightsManager.Load(_gfxDevice);
+        MultisManager.Load(_gfxDevice);
 
         var tdl = TileDataLoader.Instance;
         var landIds = new List<int>();

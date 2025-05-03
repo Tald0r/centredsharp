@@ -4,18 +4,22 @@ using ImGuiNET;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using System;
+using CentrED.IO;
+using CentrED.IO.Models;
+using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
-using static CentrED.Application; // Assuming CEDGame access
+using static CentrED.Application; // Assuming CEDGame access for UIManager/Arts/Hues
+using Vector2 = System.Numerics.Vector2;
 
 namespace CentrED.UI.Windows;
 
 public class MultisWindow : Window
 {
     public override string Name => "Multis";
-     public override WindowState DefaultState => new()
+    public override WindowState DefaultState => new()
     {
-        IsOpen = false // Default to closed initially
+        IsOpen = false
     };
 
     private string _filter = "";
@@ -23,63 +27,59 @@ public class MultisWindow : Window
     private int[] _matchedIds = System.Array.Empty<int>();
     private RenderTarget2D _previewTarget;
     private GraphicsDevice _graphicsDevice;
-    private SpriteBatch _spriteBatch; // Use a dedicated SpriteBatch for preview
+    private SpriteBatch _spriteBatch;
     private float _zoom = 1.0f;
-    private Vector2 _previewOffset = Vector2.Zero; // For panning
+    private Vector2 _previewOffset = Vector2.Zero;
     private bool _isDraggingPreview = false;
     private Vector2 _dragStartPreviewMouse;
     private Vector2 _dragStartOffset;
 
-
     public MultisWindow(GraphicsDevice gd)
     {
         _graphicsDevice = gd;
-        _spriteBatch = new SpriteBatch(gd); // Create a new SpriteBatch
-        // Attempt to load multis immediately if manager might already be loaded, or rely on filtering later
-        if (MultisManager.Instance != null)
-        {
-            FilterMultis();
-        }
+        _spriteBatch = new SpriteBatch(gd);
+        // Filter will be called in InternalDraw when MultisManager.Instance is confirmed available
     }
 
-     ~MultisWindow()
+    ~MultisWindow()
     {
         _previewTarget?.Dispose();
         _spriteBatch?.Dispose();
     }
 
-
     private void FilterMultis()
     {
-        if (MultisManager.Multis == null)
+        // Use MultisManager which wraps the ClassicUO loader access
+        if (MultisManager.Instance == null) // Check if our manager is ready
         {
-             _matchedIds = System.Array.Empty<int>();
-             return;
+            _matchedIds = System.Array.Empty<int>();
+            return;
         }
 
-        var allIds = MultisManager.Multis.Keys;
+        // Get all potentially valid IDs from the manager
+        var allValidIds = MultisManager.Instance.GetAllValidIds();
+
         if (string.IsNullOrWhiteSpace(_filter))
         {
-            _matchedIds = allIds.OrderBy(id => id).ToArray();
+            _matchedIds = allValidIds.ToArray(); // Already sorted by ID implicitly
         }
         else
         {
             var lowerFilter = _filter.ToLowerInvariant();
-             _matchedIds = allIds
-                .Where(id => id.ToString().Contains(lowerFilter) || $"0x{id:x4}".Contains(lowerFilter)) // Filter by decimal or hex ID
-                .OrderBy(id => id)
+            _matchedIds = allValidIds
+                .Where(id => id.ToString().Contains(lowerFilter) || $"0x{id:x4}".Contains(lowerFilter))
+                // No need to OrderBy, already sorted by ID
                 .ToArray();
         }
-         if (_selectedId != -1 && !_matchedIds.Contains(_selectedId))
+        if (_selectedId != -1 && !_matchedIds.Contains(_selectedId))
         {
-            // If current selection is filtered out, try to select the first available, otherwise deselect
             _selectedId = _matchedIds.Length > 0 ? _matchedIds[0] : -1;
-            ResetPreview(); // Reset zoom/pan on selection change
+            ResetPreview();
         }
         else if (_selectedId == -1 && _matchedIds.Length > 0)
         {
-             _selectedId = _matchedIds[0]; // Select first if nothing selected
-             ResetPreview();
+            _selectedId = _matchedIds[0];
+            ResetPreview();
         }
     }
 
@@ -91,22 +91,22 @@ public class MultisWindow : Window
 
     protected override void InternalDraw()
     {
-        if (!CEDClient.Initialized) // Check if client/game is ready
+        if (!CEDClient.Initialized)
         {
             ImGui.Text("Not connected or initialized.");
             return;
         }
-         if (MultisManager.Instance == null || MultisManager.Multis == null)
+        // Check if our MultisManager instance is ready
+        if (MultisManager.Instance == null)
         {
-             ImGui.Text("Multis not loaded. Check file paths or initialization order.");
-             return;
+            ImGui.Text("MultisManager not loaded. Check initialization order.");
+            return;
         }
-         // Ensure filter is run at least once if needed
-        if (_matchedIds.Length == 0 && MultisManager.Count > 0)
+        // Ensure filter is run at least once if needed
+        if (_matchedIds.Length == 0 && MultisManager.Instance.Count > 0)
         {
-            FilterMultis();
+            FilterMultis(); // Run initial filter or if cleared
         }
-
 
         ImGui.InputText("Filter ID", ref _filter, 64);
         if (ImGui.IsItemDeactivatedAfterEdit())
@@ -120,23 +120,18 @@ public class MultisWindow : Window
             FilterMultis();
         }
 
+        // --- Layout remains the same ---
         float listWidth = 150;
-        float previewHeight = 300; // Initial height, will be adjusted by splitter
-
-        var bottomPaneHeight = 50; // Height for the details pane
-
-        // Use a splitter for list and preview/info
-        ImGui.BeginChild("TopPane", new Vector2(-1, -bottomPaneHeight - ImGui.GetStyle().ItemSpacing.Y), false); // Leave space for bottom pane
-
+        var bottomPaneHeight = 50;
+        ImGui.BeginChild("TopPane", new Vector2(-1, -bottomPaneHeight - ImGui.GetStyle().ItemSpacing.Y), false);
         ImGui.Columns(2, "MultiSplitter", true);
-        if (ImGui.GetColumnIndex() == 0) // Set initial width only once
-            ImGui.SetColumnWidth(0, listWidth);
+        if (ImGui.GetColumnIndex() == 0) ImGui.SetColumnWidth(0, listWidth);
 
         // Left Column: List
-        ImGui.BeginChild("MultiList", Vector2.Zero, ImGuiChildFlags.Border); // Use Vector2.Zero to fill column
-        if (ImGui.BeginListBox("##multislistbox", new Vector2(-1, -1))) // Fill available space
+        ImGui.BeginChild("MultiList", Vector2.Zero, ImGuiChildFlags.Borders);
+        if (ImGui.BeginListBox("##multislistbox", new Vector2(-1, -1)))
         {
-             unsafe // Use clipper for performance
+            unsafe
             {
                 ImGuiListClipperPtr clipper = new ImGuiListClipperPtr(ImGuiNative.ImGuiListClipper_ImGuiListClipper());
                 clipper.Begin(_matchedIds.Length);
@@ -144,22 +139,19 @@ public class MultisWindow : Window
                 {
                     for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
                     {
-                        if (i < 0 || i >= _matchedIds.Length) continue; // Bounds check
+                        if (i < 0 || i >= _matchedIds.Length) continue;
 
                         var id = _matchedIds[i];
                         bool isSelected = id == _selectedId;
                         if (ImGui.Selectable($"0x{id:X4} ({id})", isSelected))
                         {
-                            if (_selectedId != id) // Check if selection actually changed
+                            if (_selectedId != id)
                             {
                                 _selectedId = id;
                                 ResetPreview();
                             }
                         }
-                        if (isSelected)
-                        {
-                            ImGui.SetItemDefaultFocus();
-                        }
+                        if (isSelected) ImGui.SetItemDefaultFocus();
                     }
                 }
                 clipper.End();
@@ -171,24 +163,49 @@ public class MultisWindow : Window
         ImGui.NextColumn();
 
         // Right Column: Preview and Info
-        ImGui.BeginChild("MultiPreviewPane", Vector2.Zero); // Fill column
+        ImGui.BeginChild("MultiPreviewPane", Vector2.Zero);
 
         // Info Area
         var infoHeight = 50;
-        ImGui.BeginChild("MultiInfo", new Vector2(-1, infoHeight), ImGuiChildFlags.Border);
+        ImGui.BeginChild("MultiInfo", new Vector2(-1, infoHeight), ImGuiChildFlags.Borders);
         if (_selectedId != -1)
         {
-             var multi = MultisManager.GetMulti(_selectedId);
-             if (multi != null)
-             {
-                 ImGui.Text($"ID: 0x{_selectedId:X4} ({_selectedId})"); ImGui.SameLine();
-                 ImGui.Text($"Size: {multi.Width}x{multi.Height}"); ImGui.SameLine();
-                 ImGui.Text($"Components: {multi.Items.Length}");
-             }
-             else
-             {
-                 ImGui.Text($"ID: 0x{_selectedId:X4} (Not Found/Loaded)");
-             }
+            // Get multi components using our manager, which calls ClassicUO's loader
+            List<MultiInfo>? multiComponents = MultisManager.Instance.GetMultiComponents(_selectedId);
+
+            if (multiComponents != null && multiComponents.Count > 0)
+            {
+                // Calculate bounds dynamically
+                int minX = short.MaxValue, minY = short.MaxValue, maxX = short.MinValue, maxY = short.MinValue;
+                foreach (var item in multiComponents)
+                {
+                    if (item.X < minX) minX = item.X;
+                    if (item.Y < minY) minY = item.Y;
+                    if (item.X > maxX) maxX = item.X;
+                    if (item.Y > maxY) maxY = item.Y;
+                }
+                int width = (minX == short.MaxValue) ? 0 : maxX - minX + 1;
+                int height = (minY == short.MaxValue) ? 0 : maxY - minY + 1;
+
+                ImGui.Text($"ID: 0x{_selectedId:X4} ({_selectedId})"); ImGui.SameLine();
+                ImGui.Text($"Bounds: {width}x{height}"); ImGui.SameLine();
+                ImGui.Text($"Components: {multiComponents.Count}");
+            }
+            else if (multiComponents != null) // GetMultiComponents succeeded but returned an empty list
+            {
+                ImGui.Text($"ID: 0x{_selectedId:X4} (Empty Multi)");
+            }
+            else // GetMultiComponents returned null (error occurred or invalid index)
+            {
+                if (!MultisManager.Instance.IsValidIndex(_selectedId))
+                {
+                    ImGui.Text($"ID: 0x{_selectedId:X4} (Invalid Index)");
+                }
+                else
+                {
+                    ImGui.Text($"ID: 0x{_selectedId:X4} (Error Loading)");
+                }
+            }
         }
         else
         {
@@ -197,24 +214,22 @@ public class MultisWindow : Window
         ImGui.EndChild(); // End MultiInfo
 
         // Preview Area
-        ImGui.BeginChild("MultiPreview", Vector2.Zero, ImGuiChildFlags.Border); // Fill remaining space in right column
+        ImGui.BeginChild("MultiPreview", Vector2.Zero, ImGuiChildFlags.Borders);
         DrawMultiPreview();
-        HandlePreviewInput(); // Handle zoom and pan
+        HandlePreviewInput();
         ImGui.EndChild(); // End MultiPreview
 
         ImGui.EndChild(); // End MultiPreviewPane
 
-        ImGui.Columns(1); // Reset columns before ending top pane
-
+        ImGui.Columns(1);
         ImGui.EndChild(); // End TopPane
 
         // Bottom Pane: Details/Controls
-        ImGui.BeginChild("MultiDetails", Vector2.Zero, ImGuiChildFlags.Border); // Fill bottom space
+        ImGui.BeginChild("MultiDetails", Vector2.Zero, ImGuiChildFlags.Borders);
         ImGui.Text("Preview Controls:"); ImGui.SameLine();
         ImGui.PushItemWidth(100);
         if (ImGui.SliderFloat("Zoom", ref _zoom, 0.1f, 10.0f))
         {
-            // Clamp zoom if needed
             _zoom = Math.Max(0.1f, _zoom);
         }
         ImGui.PopItemWidth();
@@ -223,11 +238,10 @@ public class MultisWindow : Window
         {
             ResetPreview();
         }
-        // Add more controls here if needed
         ImGui.EndChild(); // End MultiDetails
     }
 
-     private void DrawMultiPreview()
+    private void DrawMultiPreview()
     {
         var previewMin = ImGui.GetItemRectMin();
         var previewMax = ImGui.GetItemRectMax();
@@ -238,96 +252,116 @@ public class MultisWindow : Window
         int targetWidth = (int)previewSize.X;
         int targetHeight = (int)previewSize.Y;
 
-        // Recreate RenderTarget if size changed
+        // Recreate RenderTarget if size changed or null
         if (_previewTarget == null || _previewTarget.Width != targetWidth || _previewTarget.Height != targetHeight)
         {
             _previewTarget?.Dispose();
-            // Ensure dimensions are valid
             if (targetWidth > 0 && targetHeight > 0)
             {
-                 _previewTarget = new RenderTarget2D(_graphicsDevice, targetWidth, targetHeight, false, SurfaceFormat.Color, DepthFormat.Depth24);
+                _previewTarget = new RenderTarget2D(_graphicsDevice, targetWidth, targetHeight, false, SurfaceFormat.Color, DepthFormat.Depth24);
             }
             else
             {
-                _previewTarget = null; // Can't create if size is invalid
+                _previewTarget = null;
                 return;
             }
         }
 
         var currentTarget = _graphicsDevice.GetRenderTargets();
         _graphicsDevice.SetRenderTarget(_previewTarget);
-        _graphicsDevice.Clear(Color.DimGray); // Use a neutral background
+        _graphicsDevice.Clear(Color.DimGray);
 
-        if (_selectedId != -1)
+        if (_selectedId != -1 && MultisManager.Instance != null)
         {
-            var multi = MultisManager.GetMulti(_selectedId);
-            if (multi != null && multi.Items.Length > 0)
+            // Get components via our manager
+            List<MultiInfo>? multiComponents = MultisManager.Instance.GetMultiComponents(_selectedId);
+
+            if (multiComponents != null && multiComponents.Count > 0)
             {
-                // Use MapManager's rendering logic if possible, otherwise draw manually
-                var arts = CEDGame.MapManager.Arts; // Access existing Arts
+                // Access Arts and Hues managers (ensure they are loaded)
+                var arts = CEDGame.MapManager?.Arts;
+                var hues = HuesManager.Instance; // Use HuesManager instance
+                if (arts == null || hues == null)
+                {
+                    // Draw error message or skip if managers aren't ready
+                    _spriteBatch.Begin();
+                    // Consider drawing text here if FontSystem is available
+                    _spriteBatch.End();
+                    _graphicsDevice.SetRenderTargets(currentTarget); // Restore render target
+                    // Display placeholder in ImGui
+                    if (_previewTarget != null) ImGui.Image(CEDGame.UIManager._uiRenderer.BindTexture(_previewTarget), previewSize);
+                    return;
+                }
+
+                // Calculate bounds and center dynamically
+                int minX = short.MaxValue, minY = short.MaxValue;
+                foreach (var item in multiComponents)
+                {
+                    if (item.X < minX) minX = item.X;
+                    if (item.Y < minY) minY = item.Y;
+                }
+                int multiCenterX = -minX;
+                int multiCenterY = -minY;
 
                 // Sort items for correct drawing order (Z -> Y -> X)
-                var sortedItems = multi.Items
+                var sortedItems = multiComponents
+                    .Where(item => item.IsVisible) // Use IsVisible flag from MultiInfo
                     .OrderBy(item => item.Z)
                     .ThenBy(item => item.Y)
                     .ThenBy(item => item.X)
-                    .ToArray();
+                    .ToList();
 
-                // Calculate center point for drawing based on multi's center
-                // Offset drawing so multi's logical center (MinX + CenterX, MinY + CenterY) appears at the preview center + _previewOffset
-                float centerX = (multi.MinX + multi.CenterX) * 22; // TILE_WIDTH / 2
-                float centerY = (multi.MinY + multi.CenterY) * 22; // TILE_HEIGHT / 2
+                float originIsoX = (minX + multiCenterX) * 22;
+                float originIsoY = (minY + multiCenterY) * 22;
 
                 float renderOriginX = (targetWidth / 2f) + _previewOffset.X;
-                float renderOriginY = (targetHeight / 2f) + _previewOffset.Y; // Adjust Y origin if needed (e.g., for tall multis)
-
+                float renderOriginY = (targetHeight / 2f) + _previewOffset.Y;
 
                 _spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp, DepthStencilState.Default, RasterizerState.CullNone);
 
                 foreach (var item in sortedItems)
                 {
-                    // Skip "dynamic" items (invisible placeholders) or invalid TileIDs
-                    if (item.TileID <= 0 || item.TileID >= TileDataLoader.Instance.StaticData.Length) continue;
+                    // Check TileID validity against TileDataLoader
+                    if (item.ID <= 0 || item.ID >= TileDataLoader.Instance.StaticData.Length) continue;
 
-                    var tileData = TileDataLoader.Instance.StaticData[item.TileID];
-                    var spriteInfo = arts.GetArt(item.TileID + ArtLoader.MAX_LAND_DATA_INDEX_COUNT);
+                    var tileData = TileDataLoader.Instance.StaticData[item.ID];
+                    var spriteInfo = arts.GetArt(item.ID + ArtLoader.MAX_LAND_DATA_INDEX_COUNT);
 
                     if (spriteInfo.Texture != null)
                     {
-                        // Calculate isometric screen position relative to multi origin (item.X, item.Y, item.Z)
-                        // Using the standard UO projection:
-                        float isoX = (item.X - item.Y) * 22; // TILE_WIDTH / 2
-                        float isoY = (item.X + item.Y) * 22; // TILE_HEIGHT / 2
-
-                        // Adjust for Z height
-                        isoY -= item.Z * 4; // Z_STEP
-
-                        // Adjust for tile graphic height
+                        float isoX = (item.X - item.Y) * 22;
+                        float isoY = (item.X + item.Y) * 22;
+                        isoY -= item.Z * 4;
                         isoY -= tileData.Height;
 
-                        // Center the graphic (spriteInfo.UV is the rectangle within the texture)
                         float drawX = isoX - spriteInfo.UV.Width / 2f;
-                        float drawY = isoY - spriteInfo.UV.Height; // Origin is usually bottom-center/bottom-left for UO statics
+                        float drawY = isoY - spriteInfo.UV.Height;
 
-                        // Apply zoom and centering/offset
-                        drawX = renderOriginX + (drawX - centerX) * _zoom;
-                        drawY = renderOriginY + (drawY - centerY) * _zoom;
+                        drawX = renderOriginX + (drawX - originIsoX) * _zoom;
+                        drawY = renderOriginY + (drawY - originIsoY) * _zoom;
 
-                        // Apply hue (Simplified: White for now)
-                        // TODO: Integrate HuesManager for proper hue rendering if needed
-                        Color tint = Color.White;
+                        // Apply hue using HuesManager (Default: Hue 0 = No Hue)
+                        // Multis don't have inherent hues, so we use hue 0.
+                        // GetHueVector(ushort id, ushort hue, float alpha = 1)
+                        var hueVector = hues.GetHueVector(item.ID, 0); // Hue 0 for multis
+
+                        // Convert Vector4 hueVector to Color for SpriteBatch
+                        // This requires a helper or direct calculation based on HuesManager logic.
+                        // Placeholder: Use white until proper conversion is implemented.
+                        // TODO: Implement HuesManager.VectorToColor(hueVector) or similar.
+                        Color tint = Color.White; // Placeholder
 
                         _spriteBatch.Draw
                         (
                             spriteInfo.Texture,
                             new Vector2(drawX, drawY),
                             spriteInfo.UV,
-                            tint,
+                            tint, // Use calculated tint color
                             0f,
-                            Vector2.Zero, // Origin is top-left for SpriteBatch.Draw
-                            _zoom, // Apply zoom scale
+                            Vector2.Zero,
+                            _zoom,
                             SpriteEffects.None,
-                            0f // Depth layer (can be refined based on Z/Y for complex sorts)
+                            0f
                         );
                     }
                 }
@@ -338,35 +372,36 @@ public class MultisWindow : Window
         _graphicsDevice.SetRenderTargets(currentTarget);
 
         // Display the RenderTarget in ImGui
-        IntPtr texPtr = CEDGame.UIManager._uiRenderer.BindTexture(_previewTarget);
-        // UV coordinates are flipped vertically for RenderTargets in FNA/MonoGame by default when drawing to screen
-        ImGui.Image(texPtr, previewSize, Vector2.UnitY, Vector2.UnitX, Vector4.One, Vector4.Zero);
+        if (_previewTarget != null)
+        {
+            IntPtr texPtr = CEDGame.UIManager._uiRenderer.BindTexture(_previewTarget);
+            ImGui.Image(texPtr, previewSize, Vector2.UnitY, Vector2.UnitX, Vector4.One, Vector4.Zero);
+        }
+        else
+        {
+            ImGui.Text("Preview unavailable.");
+        }
     }
 
-     private void HandlePreviewInput()
+    // HandlePreviewInput remains the same
+    private void HandlePreviewInput()
     {
         if (!ImGui.IsItemHovered())
         {
-            _isDraggingPreview = false; // Stop dragging if mouse leaves preview
+            _isDraggingPreview = false;
             return;
         }
 
         var io = ImGui.GetIO();
 
-        // Zooming with Mouse Wheel
         if (io.MouseWheel != 0)
         {
             float zoomFactor = 1.1f;
             float scale = (io.MouseWheel > 0) ? zoomFactor : 1.0f / zoomFactor;
             _zoom *= scale;
-            _zoom = Math.Clamp(_zoom, 0.1f, 10.0f); // Clamp zoom level
-
-            // Optional: Zoom towards mouse cursor
-            // Vector2 mousePosInPreview = io.MousePos - ImGui.GetItemRectMin();
-            // _previewOffset = mousePosInPreview + (_previewOffset - mousePosInPreview) * scale;
+            _zoom = Math.Clamp(_zoom, 0.1f, 10.0f);
         }
 
-        // Panning with Middle Mouse Button (or Right Button)
         if (ImGui.IsMouseClicked(ImGuiMouseButton.Middle) || ImGui.IsMouseClicked(ImGuiMouseButton.Right))
         {
             if (!_isDraggingPreview)

@@ -19,6 +19,8 @@ public class ConfigRoot
     [XmlElement] public string Tiledata { get; set; } = "tiledata.mul";
     [XmlElement] public string Radarcol { get; set; } = "radarcol.mul";
     [XmlElement] public string Hues { get; set; } = "hues.mul";
+    [XmlElement] public string MultiMul { get; set; } = "multi.mul";
+    [XmlElement] public string MultiIdx { get; set; } = "multi.idx";
     [XmlArray] public List<Account> Accounts { get; set; } = new();
     [XmlArray] public List<Region> Regions { get; set; } = new();
     [XmlElement] public Autobackup AutoBackup { get; set; } = new();
@@ -137,6 +139,20 @@ public class ConfigRoot
         if (!string.IsNullOrEmpty(input))
         {
             result.Radarcol = input;
+        }
+
+        Console.Write($"multi.mul [{result.MultiMul}]: ");
+        input = Console.ReadLine();
+        if (!string.IsNullOrEmpty(input))
+        {
+            result.MultiMul = input;
+        }
+
+        Console.Write($"multi.idx [{result.MultiIdx}]: ");
+        input = Console.ReadLine();
+        if (!string.IsNullOrEmpty(input))
+        {
+            result.MultiIdx = input;
         }
 
         Console.WriteLine("Parameters");

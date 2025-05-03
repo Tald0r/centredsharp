@@ -1,146 +1,136 @@
 using ClassicUO.Assets;
-using ClassicUO.IO;
-using Microsoft.Xna.Framework.Graphics;
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Linq;
+using System.Threading.Tasks; // Required for Task
+using ClassicUO.IO; // Required for UOFileManager, UOFileIndex
+using Microsoft.Xna.Framework.Graphics; // Required for GraphicsDevice
 
 namespace CentrED;
 
-public struct MultiItem
-{
-    public ushort TileID;
-    public short X;
-    public short Y;
-    public short Z;
-    public uint Flags; // 1 for Static, 0 for Dynamic in Multi.mul? UOFiddler uses int, check usage.
-    // Cliloc ID is not part of the base multi.mul structure
-}
-
-public class MultiComponentList
-{
-    public int Width { get; }
-    public int Height { get; }
-    public int MaxX { get; }
-    public int MaxY { get; }
-    public int MinX { get; }
-    public int MinY { get; }
-    public int CenterX { get; }
-    public int CenterY { get; }
-    public MultiItem[] Items { get; }
-
-    // Based on UOFiddler's MultiComponentList constructor
-    public MultiComponentList(BinaryReader reader, int count)
-    {
-        Items = new MultiItem[count];
-        int minX = short.MaxValue, minY = short.MaxValue, maxX = short.MinValue, maxY = short.MinValue;
-
-        for (int i = 0; i < count; ++i)
-        {
-            Items[i].TileID = reader.ReadUInt16();
-            Items[i].X = reader.ReadInt16();
-            Items[i].Y = reader.ReadInt16();
-            Items[i].Z = reader.ReadInt16();
-            Items[i].Flags = reader.ReadUInt32(); // Read as uint (4 bytes)
-
-            // Ignore Z for bounds calculation as per UOFiddler
-            if (Items[i].X < minX) minX = Items[i].X;
-            if (Items[i].Y < minY) minY = Items[i].Y;
-            if (Items[i].X > maxX) maxX = Items[i].X;
-            if (Items[i].Y > maxY) maxY = Items[i].Y;
-        }
-
-        MinX = minX;
-        MinY = minY;
-        MaxX = maxX;
-        MaxY = maxY;
-        Width = maxX - minX + 1;
-        Height = maxY - minY + 1;
-        CenterX = -minX;
-        CenterY = -minY;
-    }
-}
-
-
 public class MultisManager
 {
+    // Instance field and property matching HuesManager
     private static MultisManager _instance;
     public static MultisManager Instance => _instance;
 
-    private static FileIndex _fileIndex;
-    private static Dictionary<int, MultiComponentList> _multis;
-    public static int Count => _multis?.Count ?? 0;
-    public static IReadOnlyDictionary<int, MultiComponentList> Multis => _multis;
+    // Reference to the singleton instance of the ClassicUO loader
+    private MultiLoader? Loader => MultiLoader.Instance;
 
+    // Private constructor for singleton pattern, called by static Load
+    private MultisManager() { }
 
-    private MultisManager()
+    // Instance Load method returns a Task and performs the async loading
+    // Called from MapManager's Task.WhenAll
+    public Task Load()
     {
-        // Private constructor for singleton
-         _multis = new Dictionary<int, MultiComponentList>();
+        return Task.Run(() =>
+        {
+            try
+            {
+                // Access the singleton instance and call its Load method
+                Loader?.Load(); // Call Load on the existing instance
+                Console.WriteLine($"[INFO] MultisManager: ClassicUO.Assets.MultiLoader loaded {Loader?.File?.Length ?? 0} entries.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ERROR] MultisManager.Load task failed: {ex.Message}\n{ex.StackTrace}");
+            }
+        });
     }
 
-    // Load multis - Call this after UOFileManager is initialized
-    public static void Load()
+    // Static Load method matching the HuesManager pattern
+    // Called after the async loading is complete.
+    // Creates the singleton instance.
+    public static void Load(GraphicsDevice gd)
     {
+        // Create the singleton instance here, like HuesManager
         _instance = new MultisManager();
-        string indexPath = UOFileManager.GetUOFilePath("multi.idx");
-        string dataPath = UOFileManager.GetUOFilePath("multi.mul");
-        // TODO: Add UOP handling based on UOFileManager.IsUOPInstallation if needed
 
-        if (!File.Exists(indexPath) || !File.Exists(dataPath))
+        // Optional: Log confirmation after instance creation
+        if (Instance.Loader == null || Instance.Loader.File == null)
         {
-            Console.WriteLine("[ERROR] MultisManager: multi.idx or multi.mul not found.");
-            // Consider logging instead of Console.WriteLine
-            return;
+             Console.WriteLine("[WARN] MultisManager.Load(gd) called, but internal loader or its file is null (async load might have failed or not completed).");
         }
+        else
+        {
+             Console.WriteLine($"[INFO] MultisManager.Load(gd) confirmed initialization. Accessing {Instance.Count} multi entries.");
+        }
+    }
 
+
+    /// <summary>
+    /// Gets the total number of multi entries available (valid or invalid).
+    /// Uses the singleton loader instance.
+    /// </summary>
+    // Cast long to int for Count
+    public int Count => (int)(Loader?.File?.Length ?? 0);
+
+    /// <summary>
+    /// Checks if a multi index is potentially valid (has an entry in the index file).
+    /// Uses the singleton loader instance.
+    /// </summary>
+    public bool IsValidIndex(int index)
+    {
+        // Use File.Length for bounds check
+        if (Loader?.File == null || index < 0 || index >= Loader.File.Length)
+        {
+            return false;
+        }
+        // Use GetValidRefEntry and check its properties
+        ref readonly var entry = ref Loader.File.GetValidRefEntry(index);
+        // Check if the entry lookup is valid or if it has a defined length
+        return entry.Lookup != 0 || entry.Length > 0;
+    }
+
+    /// <summary>
+    /// Retrieves the list of components for a given multi index using the ClassicUO loader.
+    /// Returns null if the loader isn't available or the index is invalid.
+    /// Can throw exceptions if reading the multi data fails.
+    /// Uses the singleton loader instance.
+    /// </summary>
+    // Use fully qualified name ClassicUO.Assets.MultiInfo
+    public List<ClassicUO.Assets.MultiInfo>? GetMultiComponents(int index)
+    {
+        if (Loader == null) // Check the singleton instance
+        {
+             Console.WriteLine($"[WARN] MultisManager.GetMultiComponents({index}): Loader instance is null.");
+             return null;
+        }
+         if (!IsValidIndex(index)) // Use IsValidIndex for a preliminary check
+        {
+            return null;
+        }
         try
         {
-            // Assuming FileIndex constructor handles potential Verdata patching internally if needed
-            _fileIndex = new FileIndex(indexPath, dataPath, ".mul", 0x10000); // Max ID for multis, adjust if necessary
-
-            for (int i = 0; i < _fileIndex.Index.Length; ++i)
-            {
-                Stream stream = _fileIndex.Seek(i, out int length, out int extra, out bool patched); // Use ClassicUO's FileIndex method signature
-                if (stream != null && length > 0)
-                {
-                    try
-                    {
-                        using (var reader = new BinaryReader(stream))
-                        {
-                            // Size of MultiItem: ushort(2) + short(2) + short(2) + short(2) + uint(4) = 12 bytes
-                            int count = length / 12;
-                            if (count > 0)
-                            {
-                                _multis[i] = new MultiComponentList(reader, count);
-                            }
-                        }
-                    }
-                    catch(EndOfStreamException e)
-                    {
-                         Console.WriteLine($"[WARN] MultisManager: EndOfStreamException reading multi {i}. Length: {length}. Error: {e.Message}");
-                         // Skip this multi or handle partial read if possible
-                    }
-                    finally
-                    {
-                        stream.Dispose(); // Ensure stream is disposed if Seek returns a new stream
-                    }
-                }
-            }
-             Console.WriteLine($"[INFO] MultisManager: Loaded {_multis.Count} multis.");
+            // Call GetMultis on the singleton instance
+            return Loader.GetMultis((uint)index);
         }
-        catch (Exception e)
+        catch (Exception ex)
         {
-            Console.WriteLine($"[ERROR] MultisManager: Failed to load multis: {e.Message}\n{e.StackTrace}");
-            _multis?.Clear(); // Clear partially loaded data on error
+            Console.WriteLine($"[ERROR] MultisManager.GetMultiComponents({index}): {ex.Message}");
+            // Optionally log the stack trace: Console.WriteLine(ex.StackTrace);
+            return null; // Return null on error
         }
     }
 
-     public static MultiComponentList? GetMulti(int index)
+     /// <summary>
+    /// Gets all valid multi IDs.
+    /// Uses the singleton loader instance.
+    /// </summary>
+    public IEnumerable<int> GetAllValidIds()
     {
-        if (_multis == null) return null;
-        _multis.TryGetValue(index, out var multi);
-        return multi;
+        // Use File.Length for iteration bounds
+        if (Loader?.File == null)
+        {
+            yield break; // Return empty sequence if loader not ready
+        }
+
+        for (int i = 0; i < Loader.File.Length; i++)
+        {
+            if (IsValidIndex(i)) // Use the updated IsValidIndex check
+            {
+                yield return i;
+            }
+        }
     }
 }
