@@ -170,41 +170,40 @@ public class MultisWindow : Window
         ImGui.BeginChild("MultiInfo", new Vector2(-1, infoHeight), ImGuiChildFlags.Borders);
         if (_selectedId != -1)
         {
-            // Get multi components using our manager, which calls ClassicUO's loader
-            List<MultiInfo>? multiComponents = MultisManager.Instance.GetMultiComponents(_selectedId);
+            // Get multi components using our manager
+            List<MultiComponent>? multiComponents = MultisManager.Instance.GetMultiComponents(_selectedId);
 
-            if (multiComponents != null && multiComponents.Count > 0)
+            // Check the result of GetMultiComponents
+            if (multiComponents != null) // Call succeeded (index was in bounds, no read error)
             {
-                // Calculate bounds dynamically
-                int minX = short.MaxValue, minY = short.MaxValue, maxX = short.MinValue, maxY = short.MinValue;
-                foreach (var item in multiComponents)
+                if (multiComponents.Count > 0) // Multi has components
                 {
-                    if (item.X < minX) minX = item.X;
-                    if (item.Y < minY) minY = item.Y;
-                    if (item.X > maxX) maxX = item.X;
-                    if (item.Y > maxY) maxY = item.Y;
-                }
-                int width = (minX == short.MaxValue) ? 0 : maxX - minX + 1;
-                int height = (minY == short.MaxValue) ? 0 : maxY - minY + 1;
+                    // Calculate bounds dynamically
+                    int minX = short.MaxValue, minY = short.MaxValue, maxX = short.MinValue, maxY = short.MinValue;
+                    foreach (var item in multiComponents)
+                    {
+                        if (item.X < minX) minX = item.X;
+                        if (item.Y < minY) minY = item.Y;
+                        if (item.X > maxX) maxX = item.X;
+                        if (item.Y > maxY) maxY = item.Y;
+                    }
+                    int width = (minX == short.MaxValue) ? 0 : maxX - minX + 1;
+                    int height = (minY == short.MaxValue) ? 0 : maxY - minY + 1;
 
-                ImGui.Text($"ID: 0x{_selectedId:X4} ({_selectedId})"); ImGui.SameLine();
-                ImGui.Text($"Bounds: {width}x{height}"); ImGui.SameLine();
-                ImGui.Text($"Components: {multiComponents.Count}");
-            }
-            else if (multiComponents != null) // GetMultiComponents succeeded but returned an empty list
-            {
-                ImGui.Text($"ID: 0x{_selectedId:X4} (Empty Multi)");
-            }
-            else // GetMultiComponents returned null (error occurred or invalid index)
-            {
-                if (!MultisManager.Instance.IsValidIndex(_selectedId))
-                {
-                    ImGui.Text($"ID: 0x{_selectedId:X4} (Invalid Index)");
+                    ImGui.Text($"ID: 0x{_selectedId:X4} ({_selectedId})"); ImGui.SameLine();
+                    ImGui.Text($"Bounds: {width}x{height}"); ImGui.SameLine();
+                    ImGui.Text($"Components: {multiComponents.Count}");
                 }
-                else
+                else // Multi is valid but empty
                 {
-                    ImGui.Text($"ID: 0x{_selectedId:X4} (Error Loading)");
+                    ImGui.Text($"ID: 0x{_selectedId:X4} (Empty Multi)");
                 }
+            }
+            else // GetMultiComponents returned null (index out of bounds or error loading/parsing)
+            {
+                 // We can't definitively say *why* it's null without IsValidIndex,
+                 // so provide a generic error message.
+                 ImGui.Text($"ID: 0x{_selectedId:X4} (Invalid Index or Error Loading)");
             }
         }
         else
@@ -274,9 +273,9 @@ public class MultisWindow : Window
         if (_selectedId != -1 && MultisManager.Instance != null)
         {
             // Get components via our manager
-            List<MultiInfo>? multiComponents = MultisManager.Instance.GetMultiComponents(_selectedId);
+            List<MultiComponent>? multiComponents = MultisManager.Instance.GetMultiComponents(_selectedId); // Use MultiComponent
 
-            if (multiComponents != null && multiComponents.Count > 0)
+            if (multiComponents != null && multiComponents.Count > 0) // Check for null and empty
             {
                 // Access Arts and Hues managers (ensure they are loaded)
                 var arts = CEDGame.MapManager?.Arts;
@@ -295,17 +294,17 @@ public class MultisWindow : Window
 
                 // Calculate bounds and center dynamically
                 int minX = short.MaxValue, minY = short.MaxValue;
-                foreach (var item in multiComponents)
+                foreach (var item in multiComponents) // Use MultiComponent
                 {
                     if (item.X < minX) minX = item.X;
                     if (item.Y < minY) minY = item.Y;
                 }
-                int multiCenterX = -minX;
-                int multiCenterY = -minY;
+                int multiCenterX = (minX == short.MaxValue) ? 0 : -minX;
+                int multiCenterY = (minY == short.MaxValue) ? 0 : -minY;
 
                 // Sort items for correct drawing order (Z -> Y -> X)
                 var sortedItems = multiComponents
-                    .Where(item => item.IsVisible) // Use IsVisible flag from MultiInfo
+                    .Where(item => item.IsVisible) // Use IsVisible flag from MultiComponent
                     .OrderBy(item => item.Z)
                     .ThenBy(item => item.Y)
                     .ThenBy(item => item.X)
@@ -319,7 +318,7 @@ public class MultisWindow : Window
 
                 _spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp, DepthStencilState.Default, RasterizerState.CullNone);
 
-                foreach (var item in sortedItems)
+                foreach (var item in sortedItems) // Use MultiComponent
                 {
                     // Check TileID validity against TileDataLoader
                     if (item.ID <= 0 || item.ID >= TileDataLoader.Instance.StaticData.Length) continue;
@@ -329,6 +328,7 @@ public class MultisWindow : Window
 
                     if (spriteInfo.Texture != null)
                     {
+                        // Use fields from MultiComponent
                         float isoX = (item.X - item.Y) * 22;
                         float isoY = (item.X + item.Y) * 22;
                         isoY -= item.Z * 4;
@@ -340,14 +340,9 @@ public class MultisWindow : Window
                         drawX = renderOriginX + (drawX - originIsoX) * _zoom;
                         drawY = renderOriginY + (drawY - originIsoY) * _zoom;
 
-                        // Apply hue using HuesManager (Default: Hue 0 = No Hue)
-                        // Multis don't have inherent hues, so we use hue 0.
-                        // GetHueVector(ushort id, ushort hue, float alpha = 1)
+                        // Apply hue using HuesManager
                         var hueVector = hues.GetHueVector(item.ID, 0); // Hue 0 for multis
 
-                        // Convert Vector4 hueVector to Color for SpriteBatch
-                        // This requires a helper or direct calculation based on HuesManager logic.
-                        // Placeholder: Use white until proper conversion is implemented.
                         // TODO: Implement HuesManager.VectorToColor(hueVector) or similar.
                         Color tint = Color.White; // Placeholder
 
@@ -383,7 +378,6 @@ public class MultisWindow : Window
         }
     }
 
-    // HandlePreviewInput remains the same
     private void HandlePreviewInput()
     {
         if (!ImGui.IsItemHovered())

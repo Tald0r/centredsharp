@@ -2,10 +2,22 @@ using ClassicUO.Assets;
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks; // Required for Task
-using ClassicUO.IO; // Required for UOFileManager, UOFileIndex
+using ClassicUO.IO; // Required for UOFileIndex, UOFile, StackDataReader
 using Microsoft.Xna.Framework.Graphics; // Required for GraphicsDevice
+using System.Runtime.InteropServices; // Required for StructLayout
+using System.Runtime.CompilerServices; // Required for Unsafe
 
 namespace CentrED;
+
+// Define struct to hold component info
+public struct MultiComponent
+{
+    public ushort ID;
+    public short X;
+    public short Y;
+    public short Z;
+    public bool IsVisible; // Simplified flag based on parsing logic
+}
 
 public class MultisManager
 {
@@ -20,22 +32,11 @@ public class MultisManager
     private MultisManager() { }
 
     // Instance Load method returns a Task and performs the async loading
-    // Called from MapManager's Task.WhenAll
+    // It calls the Load method of the MultiLoader singleton instance.
     public Task Load()
     {
-        return Task.Run(() =>
-        {
-            try
-            {
-                // Access the singleton instance and call its Load method
-                Loader?.Load(); // Call Load on the existing instance
-                Console.WriteLine($"[INFO] MultisManager: ClassicUO.Assets.MultiLoader loaded {Loader?.File?.Length ?? 0} entries.");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[ERROR] MultisManager.Load task failed: {ex.Message}\n{ex.StackTrace}");
-            }
-        });
+        // Directly return the task from the underlying loader
+        return Loader?.Load() ?? Task.CompletedTask;
     }
 
     // Static Load method matching the HuesManager pattern
@@ -49,7 +50,7 @@ public class MultisManager
         // Optional: Log confirmation after instance creation
         if (Instance.Loader == null || Instance.Loader.File == null)
         {
-             Console.WriteLine("[WARN] MultisManager.Load(gd) called, but internal loader or its file is null (async load might have failed or not completed).");
+             Console.WriteLine("[WARN] MultisManager.Load(gd) called, but ClassicUO.Assets.MultiLoader instance or its File is null.");
         }
         else
         {
@@ -57,80 +58,130 @@ public class MultisManager
         }
     }
 
+    /// <summary>
+    /// Gets the total number of multi entries available.
+    /// Uses the singleton loader instance's Count property.
+    /// </summary>
+    public int Count => Loader?.Count ?? 0;
 
     /// <summary>
-    /// Gets the total number of multi entries available (valid or invalid).
-    /// Uses the singleton loader instance.
+    /// Retrieves the list of components for a given multi index.
+    /// Uses the UOFile provided by MultiLoader.Instance to read and parse the specific data block.
+    /// Assumes MUL format only.
+    /// Returns null if the loader isn't available or the index is invalid/causes an error during read.
+    /// Returns an empty list for valid but empty entries.
     /// </summary>
-    // Cast long to int for Count
-    public int Count => (int)(Loader?.File?.Length ?? 0);
-
-    /// <summary>
-    /// Checks if a multi index is potentially valid (has an entry in the index file).
-    /// Uses the singleton loader instance.
-    /// </summary>
-    public bool IsValidIndex(int index)
+    public unsafe List<MultiComponent>? GetMultiComponents(int index)
     {
-        // Use File.Length for bounds check
-        if (Loader?.File == null || index < 0 || index >= Loader.File.Length)
+        // Check if Loader and its File are available
+        if (Loader?.File == null)
         {
-            return false;
-        }
-        // Use GetValidRefEntry and check its properties
-        ref readonly var entry = ref Loader.File.GetValidRefEntry(index);
-        // Check if the entry lookup is valid or if it has a defined length
-        return entry.Lookup != 0 || entry.Length > 0;
-    }
-
-    /// <summary>
-    /// Retrieves the list of components for a given multi index using the ClassicUO loader.
-    /// Returns null if the loader isn't available or the index is invalid.
-    /// Can throw exceptions if reading the multi data fails.
-    /// Uses the singleton loader instance.
-    /// </summary>
-    // Use fully qualified name ClassicUO.Assets.MultiInfo
-    public List<ClassicUO.Assets.MultiInfo>? GetMultiComponents(int index)
-    {
-        if (Loader == null) // Check the singleton instance
-        {
-             Console.WriteLine($"[WARN] MultisManager.GetMultiComponents({index}): Loader instance is null.");
+             Console.WriteLine($"[WARN] MultisManager.GetMultiComponents({index}): Loader instance or its File is null.");
              return null;
         }
-         if (!IsValidIndex(index)) // Use IsValidIndex for a preliminary check
+        // Bounds check against Loader.Count
+         if (index < 0 || index >= Loader.Count)
         {
-            return null;
+             Console.WriteLine($"[WARN] MultisManager.GetMultiComponents({index}): Index out of bounds (0-{Loader.Count - 1}).");
+            return null; // Index is outside the known range
         }
+
+        var list = new List<MultiComponent>();
         try
         {
-            // Call GetMultis on the singleton instance
-            return Loader.GetMultis((uint)index);
+            // Use the File object provided by MultiLoader.Instance
+            var file = Loader.File;
+            // Get the "pointer" (index entry) for this multi ID
+            ref readonly var entry = ref file.GetValidRefEntry(index);
+
+            // If entry lookup failed or length is zero, it's an empty/invalid multi
+            if (entry.Lookup == 0 || entry.Length <= 0)
+            {
+                // Console.WriteLine($"[DEBUG] MultisManager.GetMultiComponents({index}): Entry has Lookup {entry.Lookup}, Length {entry.Length}. Returning empty list.");
+                return list;
+            }
+
+            // *** Use the UOFile (Loader.File) to read the specific data block ***
+            // This is necessary to get the component data based on the entry "pointer"
+            file.Seek(entry.Offset, System.IO.SeekOrigin.Begin);
+            var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent((int)entry.Length);
+            try
+            {
+                // Read the data using the file handle from MultiLoader
+                file.Read(buffer, 0, (int)entry.Length);
+                var reader = new StackDataReader(buffer.AsSpan(0, (int)entry.Length));
+
+                // Simplified parsing: Assume MUL format only
+                var blockSize = sizeof(MultiBlock);
+                if (blockSize == 0)
+                {
+                    Console.WriteLine($"[ERROR] MultisManager.GetMultiComponents({index}): MultiBlock size is zero.");
+                    return null;
+                }
+                var componentCount = entry.Length / blockSize;
+
+                for (var i = 0; i < componentCount; ++i)
+                {
+                    var block = reader.Read<MultiBlock>();
+                    list.Add(new MultiComponent
+                    {
+                        ID = block.ID,
+                        X = block.X,
+                        Y = block.Y,
+                        Z = block.Z,
+                        IsVisible = block.Flags != 0 // Standard MUL visibility check
+                    });
+                }
+            }
+            finally
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
-        catch (Exception ex)
+        catch (Exception ex) // Catch potential exceptions during file access or parsing
         {
             Console.WriteLine($"[ERROR] MultisManager.GetMultiComponents({index}): {ex.Message}");
-            // Optionally log the stack trace: Console.WriteLine(ex.StackTrace);
             return null; // Return null on error
         }
+        return list;
     }
 
      /// <summary>
-    /// Gets all valid multi IDs.
-    /// Uses the singleton loader instance.
+    /// Gets all valid multi IDs by iterating up to the Count provided by MultiLoader.
     /// </summary>
     public IEnumerable<int> GetAllValidIds()
     {
-        // Use File.Length for iteration bounds
-        if (Loader?.File == null)
+        if (Loader == null) // Check if loader itself is available
         {
-            yield break; // Return empty sequence if loader not ready
+            yield break;
         }
-
-        for (int i = 0; i < Loader.File.Length; i++)
+        // Iterate from 0 up to the Count provided by MultiLoader
+        for (int i = 0; i < Loader.Count; i++)
         {
-            if (IsValidIndex(i)) // Use the updated IsValidIndex check
-            {
-                yield return i;
-            }
+            // Yield all indices in the range. GetMultiComponents will handle if they are truly empty/invalid.
+            yield return i;
         }
     }
+}
+
+// Define the structs needed for parsing, based on MultiLoader source
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public ref struct MultiBlock
+{
+    public ushort ID;
+    public short X;
+    public short Y;
+    public short Z;
+    public uint Flags;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public ref struct MultiBlockNew // Not used for parsing in MUL-only mode
+{
+    public ushort ID;
+    public short X;
+    public short Y;
+    public short Z;
+    public ushort Flags;
+    public uint Unknown;
 }
